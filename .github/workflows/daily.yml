@@ -1,15 +1,27 @@
-name: Daily Spanish On-This-Day Poster
+name: Bot de Efemérides
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 08:00 UTC = 09:00 Madrid (invierno)
+    # Lunes a viernes - 06:30 UTC
+    # ≈ 07:30 en España (CET) / 08:30 en verano (CEST)
+    - cron: '30 6 * * 1-5'
+
+    # Sábados y domingos - 08:00 UTC
+    # ≈ 09:00 en España (CET) / 10:00 en verano (CEST)
+    - cron: '0 8 * * 6,0'
+
+  # Permite lanzarlo a mano desde la pestaña "Actions"
   workflow_dispatch:
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -18,17 +30,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Run script
-        env:
-          TWITTER_API_KEY: ${{ secrets.TWITTER_API_KEY }}
-          TWITTER_API_SECRET: ${{ secrets.TWITTER_API_SECRET }}
-          TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
-          TWITTER_ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python main.py
+      - name: Run efemerides bot
+        run: python main.py
