@@ -1,12 +1,17 @@
-import os, requests, datetime, pytz, sys, time
+import os
+import requests
+import datetime
+import pytz
+import sys
+import time
 
 TZ = "Europe/Madrid"
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 KEYWORDS_PRIORITY = [
-    "Armada","Descubrimiento","Reyes Católicos","Imperio","Monarquía Hispánica",
-    "Magallanes","Elcano","Lepanto","América","Pacífico","Galeón","Naval",
-    "Ciencia","Cultural","Constitución","Exploración","Cartagena de Indias",
-    "Sevilla","Madrid","Toledo","Granada","Castilla","Aragón","España"
+    "Armada", "Descubrimiento", "Reyes Católicos", "Imperio", "Monarquía Hispánica",
+    "Magallanes", "Elcano", "Lepanto", "América", "Pacífico", "Galeón", "Naval",
+    "Ciencia", "Cultural", "Constitución", "Exploración", "Cartagena de Indias",
+    "Sevilla", "Madrid", "Toledo", "Granada", "Castilla", "Aragón", "España"
 ]
 
 TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
@@ -17,16 +22,21 @@ TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
+
+
 def today_parts():
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
     return now.year, now.month, now.day
 
 
-# -------------------------------
-#   FUNCIÓN NUEVA CON REINTENTOS
-# -------------------------------
 def safe_request(url, params=None, headers=None, tries=5, wait=3):
+    if headers is None:
+        headers = {}
+    if "User-Agent" not in headers:
+        headers["User-Agent"] = USER_AGENT
+
     for i in range(tries):
         try:
             r = requests.get(url, params=params, headers=headers, timeout=15)
@@ -65,9 +75,11 @@ def fetch_wikidata_events(month: int, day: int):
     ORDER BY DESC(?eventDate)
     LIMIT 20
     """
-    headers = {"Accept": "application/sparql-results+json"}
+    headers = {
+        "Accept": "application/sparql-results+json",
+        "User-Agent": USER_AGENT,
+    }
 
-    # Usamos safe_request en lugar de requests.get
     r = safe_request(endpoint, params={"query": query}, headers=headers)
     data = r.json()["results"]["bindings"]
 
@@ -91,7 +103,7 @@ def score_event(ev):
     try:
         year = int(ev["date"][:4])
         score += max(0, (year - 1500) / 200.0)
-    except:
+    except Exception:
         pass
     return score
 
@@ -109,10 +121,9 @@ def fetch_wikipedia_summary(title_or_url: str):
 
     url = f"https://es.wikipedia.org/api/rest_v1/page/summary/{title}"
 
-    # Aquí también usamos safe_request
     try:
-        r = safe_request(url)
-    except:
+        r = safe_request(url, headers={"User-Agent": USER_AGENT})
+    except Exception:
         return None
 
     j = r.json()
@@ -128,16 +139,20 @@ def compose_post(ev, summary):
     if ev and ev.get("date"):
         try:
             anio = int(ev["date"][:4])
-        except:
+        except Exception:
             pass
 
     titulo = summary["title"] if summary and summary.get("title") else ev["label"]
-    base = f"🇪🇸 Tal día como hoy, en {anio}, {titulo}." if anio else f"🇪🇸 Tal día como hoy: {titulo}."
+    if anio:
+        base = f"🇪🇸 Tal día como hoy, en {anio}, {titulo}."
+    else:
+        base = f"🇪🇸 Tal día como hoy: {titulo}."
 
     extra = ""
     if summary and summary.get("extract"):
         extract = summary["extract"]
-        extract = (extract[:220] + "…") if len(extract) > 220 else extract
+        if len(extract) > 220:
+            extract = extract[:220] + "…"
         extra = f"\n{extract}"
 
     hashtags = " ".join(DEFAULT_HASHTAGS)
@@ -145,6 +160,17 @@ def compose_post(ev, summary):
     tail = f"\n\n{hashtags}\nFuente: {url}" if url else f"\n\n{hashtags}"
 
     return (base + extra + tail)[:275]
+
+
+def compose_fallback_post(month: int, day: int):
+    fecha = f"{day:02d}/{month:02d}"
+    text = (
+        f"🇪🇸 Tal día como hoy ({fecha}) seguimos completando nuestro archivo de hazañas del "
+        f"Imperio Español. Hoy no hemos podido recuperar una efeméride concreta por problemas "
+        f"técnicos con las fuentes, pero la historia de España no descansa.\n\n"
+        + " ".join(DEFAULT_HASHTAGS)
+    )
+    return text[:275]
 
 
 def post_to_twitter(text):
@@ -167,22 +193,26 @@ def notify_telegram(msg):
 def main():
     _, month, day = today_parts()
 
+    use_fallback = False
+    events = []
     try:
         events = fetch_wikidata_events(month, day)
     except Exception as e:
         print("⚠️ Error serio con Wikidata:", e)
-        sys.exit(0)
+        use_fallback = True
 
     if not events:
-        print("No events found.")
-        sys.exit(0)
+        print("No se han encontrado efemérides en Wikidata para hoy.")
+        use_fallback = True
 
-    best = choose_best(events)
-    summary = fetch_wikipedia_summary(best["wp_es"]) if best.get("wp_es") else None
-    if not summary:
-        summary = {"title": best["label"], "extract": "", "url": ""}
-
-    text = compose_post(best, summary)
+    if use_fallback:
+        text = compose_fallback_post(month, day)
+    else:
+        best = choose_best(events)
+        summary = fetch_wikipedia_summary(best["wp_es"]) if best.get("wp_es") else None
+        if not summary:
+            summary = {"title": best["label"], "extract": "", "url": ""}
+        text = compose_post(best, summary)
 
     try:
         post_to_twitter(text)
