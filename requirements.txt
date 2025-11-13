@@ -1,3 +1,4 @@
-requests==2.32.3
-tweepy==4.14.0
-pytz==2024.1
+requests
+pytz
+tweepy
+openai>=1.0.0
