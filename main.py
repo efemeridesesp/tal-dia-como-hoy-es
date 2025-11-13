@@ -235,6 +235,16 @@ Instrucciones para el tweet:
 
 def post_to_twitter(text):
     import tweepy
+
+    # DEBUG: ver si las claves están presentes (True/False)
+    print(
+        "DEBUG Twitter keys present:",
+        bool(TW_API_KEY),
+        bool(TW_API_SECRET),
+        bool(TW_ACCESS_TOKEN),
+        bool(TW_ACCESS_SECRET),
+    )
+
     auth = tweepy.OAuth1UserHandler(
         TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
     )
