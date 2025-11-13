@@ -1,4 +1,4 @@
-import os, requests, datetime, pytz, sys
+import os, requests, datetime, pytz, sys, time
 
 TZ = "Europe/Madrid"
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
@@ -21,6 +21,24 @@ def today_parts():
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
     return now.year, now.month, now.day
+
+
+# -------------------------------
+#   FUNCIÓN NUEVA CON REINTENTOS
+# -------------------------------
+def safe_request(url, params=None, headers=None, tries=5, wait=3):
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            if i < tries - 1:
+                print(f"⚠️ Error al conectar ({e}). Reintentando en {wait} segundos...")
+                time.sleep(wait)
+            else:
+                raise
+
 
 def fetch_wikidata_events(month: int, day: int):
     endpoint = "https://query.wikidata.org/sparql"
@@ -48,9 +66,11 @@ def fetch_wikidata_events(month: int, day: int):
     LIMIT 20
     """
     headers = {"Accept": "application/sparql-results+json"}
-    r = requests.get(endpoint, params={"query": query}, headers=headers, timeout=30)
-    r.raise_for_status()
+
+    # Usamos safe_request en lugar de requests.get
+    r = safe_request(endpoint, params={"query": query}, headers=headers)
     data = r.json()["results"]["bindings"]
+
     events = []
     for b in data:
         events.append({
@@ -60,6 +80,7 @@ def fetch_wikidata_events(month: int, day: int):
             "qid": b.get("item", {}).get("value", "").split("/")[-1],
         })
     return events
+
 
 def score_event(ev):
     score = 0
@@ -74,25 +95,33 @@ def score_event(ev):
         pass
     return score
 
+
 def choose_best(events):
     if not events:
         return None
     return sorted(events, key=score_event, reverse=True)[0]
 
+
 def fetch_wikipedia_summary(title_or_url: str):
     title = title_or_url
     if "wikipedia.org" in title_or_url:
         title = title_or_url.rstrip("/").split("/")[-1]
+
     url = f"https://es.wikipedia.org/api/rest_v1/page/summary/{title}"
-    r = requests.get(url, timeout=20)
-    if r.status_code != 200:
+
+    # Aquí también usamos safe_request
+    try:
+        r = safe_request(url)
+    except:
         return None
+
     j = r.json()
     return {
         "title": j.get("title"),
         "extract": j.get("extract"),
         "url": j.get("content_urls", {}).get("desktop", {}).get("page"),
     }
+
 
 def compose_post(ev, summary):
     anio = None
@@ -101,18 +130,22 @@ def compose_post(ev, summary):
             anio = int(ev["date"][:4])
         except:
             pass
+
     titulo = summary["title"] if summary and summary.get("title") else ev["label"]
     base = f"🇪🇸 Tal día como hoy, en {anio}, {titulo}." if anio else f"🇪🇸 Tal día como hoy: {titulo}."
+
     extra = ""
     if summary and summary.get("extract"):
         extract = summary["extract"]
         extract = (extract[:220] + "…") if len(extract) > 220 else extract
         extra = f"\n{extract}"
+
     hashtags = " ".join(DEFAULT_HASHTAGS)
     url = summary.get("url") if summary and summary.get("url") else ""
     tail = f"\n\n{hashtags}\nFuente: {url}" if url else f"\n\n{hashtags}"
-    text = base + extra + tail
-    return text[:275]
+
+    return (base + extra + tail)[:275]
+
 
 def post_to_twitter(text):
     import tweepy
@@ -123,31 +156,41 @@ def post_to_twitter(text):
     api.verify_credentials()
     api.update_status(status=text)
 
+
 def notify_telegram(msg):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
+
 def main():
     _, month, day = today_parts()
-    events = fetch_wikidata_events(month, day)
+
+    try:
+        events = fetch_wikidata_events(month, day)
+    except Exception as e:
+        print("⚠️ Error serio con Wikidata:", e)
+        sys.exit(0)
+
     if not events:
-        notify_telegram(f"No se encontraron efemérides para {day}/{month}.")
         print("No events found.")
         sys.exit(0)
+
     best = choose_best(events)
     summary = fetch_wikipedia_summary(best["wp_es"]) if best.get("wp_es") else None
     if not summary:
         summary = {"title": best["label"], "extract": "", "url": ""}
+
     text = compose_post(best, summary)
+
     try:
         post_to_twitter(text)
-        notify_telegram(f"Publicado en X: {text[:120]}…")
         print("Tweet posted.")
     except Exception as e:
-        notify_telegram(f"Error publicando en X: {e}")
+        print("❌ Error posting to Twitter:", e)
         raise
+
 
 if __name__ == "__main__":
     main()
