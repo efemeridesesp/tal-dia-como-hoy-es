@@ -5,6 +5,8 @@ import pytz
 import sys
 import time
 
+from openai import OpenAI
+
 TZ = "Europe/Madrid"
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 KEYWORDS_PRIORITY = [
@@ -23,6 +25,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
+
+# Cliente de OpenAI: cogerá OPENAI_API_KEY de la variable de entorno
+client = OpenAI()
 
 
 def today_parts():
@@ -135,6 +140,7 @@ def fetch_wikipedia_summary(title_or_url: str):
 
 
 def compose_post(ev, summary):
+    """Versión clásica sin OpenAI (fallback)."""
     anio = None
     if ev and ev.get("date"):
         try:
@@ -171,6 +177,60 @@ def compose_fallback_post(month: int, day: int):
         + " ".join(DEFAULT_HASHTAGS)
     )
     return text[:275]
+
+
+def generate_openai_tweet(ev, summary, month: int, day: int) -> str:
+    """Usa OpenAI para escribir el tweet final, con límite y hashtags."""
+    anio = None
+    if ev and ev.get("date"):
+        try:
+            anio = int(ev["date"][:4])
+        except Exception:
+            pass
+
+    titulo = summary["title"] if summary and summary.get("title") else ev["label"]
+    extract = summary.get("extract") if summary else ""
+    url = summary.get("url") if summary else ""
+    hashtags = " ".join(DEFAULT_HASHTAGS)
+
+    fecha_str = f"{day:02d}/{month:02d}"
+    anio_str = str(anio) if anio else "año no determinado"
+
+    prompt = f"""
+Eres community manager experto en historia de España.
+Escribe UN ÚNICO tweet en español para X sobre una efeméride.
+
+Datos:
+- Fecha: {fecha_str}
+- Año del evento: {anio_str}
+- Título: {titulo}
+- Descripción breve tomada de Wikipedia: {extract}
+- Enlace de referencia (si lo ves útil): {url}
+
+Instrucciones para el tweet:
+- Empieza con "🇪🇸 Tal día como hoy".
+- Tono: divulgativo, interesante y ligeramente épico, pero sin parecer panfleto.
+- Incluye el enlace de referencia solo si cabe de forma natural.
+- Añade exactamente estos hashtags al final y en este orden: {hashtags}
+- Máximo 275 caracteres en TOTAL (contando espacios, enlace y hashtags).
+- No añadas explicaciones, ni comillas, ni notas externas. Devuelve SOLO el texto del tweet listo para publicar.
+"""
+
+    completion = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "Eres un experto en redes sociales de historia de España."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    tweet = completion.choices[0].message.content.strip()
+
+    # Por si el modelo se pasa un poco, recortamos duro:
+    if len(tweet) > 275:
+        tweet = tweet[:272] + "…"
+
+    return tweet
 
 
 def post_to_twitter(text):
@@ -212,13 +272,22 @@ def main():
         summary = fetch_wikipedia_summary(best["wp_es"]) if best.get("wp_es") else None
         if not summary:
             summary = {"title": best["label"], "extract": "", "url": ""}
-        text = compose_post(best, summary)
+
+        # Primero intentamos con OpenAI
+        try:
+            text = generate_openai_tweet(best, summary, month, day)
+            print("✅ Tweet generado con OpenAI.")
+        except Exception as e:
+            print("⚠️ Error usando OpenAI, usando versión clásica:", e)
+            text = compose_post(best, summary)
 
     try:
         post_to_twitter(text)
         print("Tweet posted.")
+        notify_telegram(f"✅ Tweet publicado:\n\n{text}")
     except Exception as e:
         print("❌ Error posting to Twitter:", e)
+        notify_telegram(f"❌ Error al publicar tweet: {e}")
         raise
 
 
