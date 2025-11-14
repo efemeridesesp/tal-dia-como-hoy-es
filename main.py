@@ -13,448 +13,326 @@ TZ = "Europe/Madrid"
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 
 SPANISH_ACTOR_TOKENS = [
-    "reyes católicos", "imperio español", "monarquía hispánica", "monarquía española",
-    "armada española", "ejército español", "tercios", "tercios españoles",
-    "tercios de flandes", "virreinato de", "virreinato del", "virreinato de nueva españa",
-    "virreinato del perú", "virreinato del río de la plata", "virrey", "virreina",
-    "corona de castilla", "corona de aragón",
+    "reyes católicos","imperio español","monarquía hispánica","monarquía española",
+    "armada española","ejército español","tercios","tercios españoles","tercios de flandes",
+    "virreinato de","virreinato del","virreinato de nueva españa","virreinato del perú",
+    "virreinato del río de la plata","virrey","virreina","corona de castilla","corona de aragón",
 ]
 
 SPANISH_WIDE_TOKENS = [
-    "españa", "español", "española", "españoles", "hispania", "hispano", "hispánica",
-    "reino de castilla", "reino de aragón", "castilla", "aragón", "granada", "sevilla",
-    "toledo", "madrid", "cartagena", "cartagena de indias", "virreinato", "borbón",
-    "borbones", "habsburgo", "felipe ii", "felipe iii", "felipe iv",
-    "carlos v", "carlos i de españa", "alfonso xii", "alfonso xiii", "isabel ii",
-    "partido comunista de españa", "radio barcelona",
+    "españa","español","española","españoles","hispania","hispano","hispánica",
+    "reino de castilla","reino de aragón","castilla","aragón","granada","sevilla",
+    "toledo","madrid","cartagena","cartagena de indias","virreinato","borbón","borbones",
+    "habsburgo","felipe ii","felipe iii","felipe iv","carlos v","carlos i de españa",
+    "alfonso xii","alfonso xiii","isabel ii","partido comunista de españa","radio barcelona",
 ]
 
 SPANISH_THEATRE_TOKENS = [
-    "málaga", "cádiz", "cartagena", "cartagena de indias", "barcelona",
-    "valencia", "bilbao", "santander", "la coruña", "ceuta", "melilla",
-    "baleares", "canarias",
+    "málaga","cádiz","cartagena","cartagena de indias","barcelona","valencia",
+    "bilbao","santander","la coruña","ceuta","melilla","baleares","canarias",
 ]
 
 MILITARY_KEYWORDS = [
-    "batalla", "guerra", "combate", "frente", "asedio", "sitio", "conquista",
-    "derrota", "victoria", "alzamiento", "revolución", "levantamiento",
-    "sublevación", "bombardeo", "invasión", "ejército", "toma", "capitulación",
-    "ofensiva", "defensiva",
+    "batalla","guerra","combate","frente","asedio","sitio","conquista","derrota",
+    "victoria","alzamiento","revolución","levantamiento","sublevación","bombardeo",
+    "invasión","ejército","toma","capitulación","ofensiva","defensiva",
 ]
 
-DIPLO_KEYWORDS = ["tratado", "acuerdo", "paz", "alianza", "capitulaciones", "concordia"]
+DIPLO_KEYWORDS = ["tratado","acuerdo","paz","alianza","capitulaciones","concordia"]
 
 FOREIGN_TOKENS = [
-    "alemán", "alemana", "alemania", "nazi", "británico", "británica", "inglés",
-    "inglesa", "inglaterra", "estadounidense", "americano", "americana", "ee.uu",
-    "eeuu", "francés", "francesa", "francia", "italiano", "italiana", "italia",
-    "ruso", "rusa", "rusia", "soviético", "soviética", "urss", "japonés", "japonesa",
-    "japón",
+    "alemán","alemana","alemania","nazi","británico","británica","inglés","inglesa",
+    "inglaterra","estadounidense","americano","americana","ee.uu","eeuu","francés",
+    "francesa","francia","italiano","italiana","italia","ruso","rusa","rusia",
+    "soviético","soviética","urss","japonés","japonesa","japón",
 ]
 
 CULTURE_LOW_PRIORITY = [
-    "premio", "premios", "concurso", "festival", "certamen", "programa de radio",
-    "programa de televisión", "radio", "televisión", "serie", "película", "cine",
-    "novela", "poeta", "cantante", "músico", "discográfica", "disco", "álbum",
-    "single",
+    "premio","premios","concurso","festival","certamen","programa de radio",
+    "programa de televisión","radio","televisión","serie","película","cine","novela",
+    "poeta","cantante","músico","discográfica","disco","álbum","single",
 ]
 
-TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
-TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
-TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
-TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
-TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
+TW_API_KEY = os.getenv("TWITTER_API_KEY")
+TW_API_SECRET = os.getenv("TWITTER_API_SECRET")
+TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN")
+TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
+TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0"
-
 client = OpenAI()
+
+# ---------------------
+# FECHA
+# ---------------------
 
 def today_info():
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
-    year = now.year
-    month = now.month
-    day = now.day
+    meses = ["","enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+    return now.year, now.month, now.day, meses[now.month]
 
-    meses = [
-        "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
-        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
-    ]
-    month_name = meses[month]
-    return year, month, day, month_name
+# ---------------------
+# SCRAPER EFEMÉRIDES
+# ---------------------
 
-
-def fetch_hoyenlahistoria_events():
+def fetch_events():
     url = "https://www.hoyenlahistoria.com/efemerides.php"
-    headers = {"User-Agent": USER_AGENT}
-    resp = requests.get(url, headers=headers, timeout=25)
-    resp.raise_for_status()
+    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    r.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(r.text, "html.parser")
     events = []
 
     for li in soup.find_all("li"):
         text = " ".join(li.stripped_strings)
-        if not text:
-            continue
-
         m = re.match(r"^(\d+)\s*(a\.C\.)?\s*(.*)", text)
         if not m:
             continue
-
-        year_str, era, rest = m.groups()
+        year_str, era, body = m.groups()
         try:
             year = int(year_str)
-        except ValueError:
+        except:
             continue
-
         if era:
             year = -year
-
-        body = rest.strip()
-        if not body:
-            continue
-
-        events.append({
-            "year": year,
-            "text": body,
-            "raw": text,
-            "source": "hoyenlahistoria"
-        })
-
+        body = body.strip()
+        if body:
+            events.append({"year": year, "text": body})
     return events
 
+# ---------------------
+# SCORING
+# ---------------------
 
 def compute_score(ev):
-    text = ev["text"]
-    t_low = text.lower()
-    year = ev["year"]
+    t = ev["text"].lower()
+    y = ev["year"]
+    s = 0
 
-    score = 0.0
+    if any(x in t for x in SPANISH_ACTOR_TOKENS): s += 35
+    if any(x in t for x in SPANISH_WIDE_TOKENS): s += 18
+    if any(x in t for x in SPANISH_THEATRE_TOKENS): s += 5
+    if any(x in t for x in MILITARY_KEYWORDS): s += 12
+    if any(x in t for x in DIPLO_KEYWORDS): s += 8
 
-    has_spanish_actor = any(tok in t_low for tok in SPANISH_ACTOR_TOKENS)
-    has_spanish_wide = any(tok in t_low for tok in SPANISH_WIDE_TOKENS)
-    has_spanish_theatre = any(tok in t_low for tok in SPANISH_THEATRE_TOKENS)
-    has_military = any(kw in t_low for kw in MILITARY_KEYWORDS)
-    has_diplomatic = any(kw in t_low for kw in DIPLO_KEYWORDS)
-    has_foreign = any(tok in t_low for tok in FOREIGN_TOKENS)
+    if any(x in t for x in CULTURE_LOW_PRIORITY): s -= 12
 
-    if has_spanish_actor:
-        score += 35
-    if has_spanish_wide:
-        score += 18
-    if has_spanish_theatre:
-        score += 5
-    if has_military:
-        score += 12
-    if has_diplomatic:
-        score += 8
+    if 1400 <= y <= 1899: s += 5
 
-    for kw in CULTURE_LOW_PRIORITY:
-        if kw in t_low:
-            score -= 12
+    if any(x in t for x in MILITARY_KEYWORDS) and any(x in t for x in FOREIGN_TOKENS) and not any(x in t for x in SPANISH_ACTOR_TOKENS) and not any(x in t for x in DIPLO_KEYWORDS):
+        s -= 40
 
-    if 1400 <= year <= 1899:
-        score += 5
+    ev["score"] = s
 
-    if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
-        score -= 40
-
-    ev["score"] = score
-    ev["has_spanish_actor"] = has_spanish_actor
-    ev["has_spanish_wide"] = has_spanish_wide
-    ev["has_spanish_theatre"] = has_spanish_theatre
-    ev["has_military"] = has_military
-    ev["has_diplomatic"] = has_diplomatic
-    ev["has_foreign"] = has_foreign
-
-
-def choose_best_event(events):
+def choose_best(events):
     if not events:
         return None
     for ev in events:
         compute_score(ev)
     return max(events, key=lambda e: e["score"])
 
+# ---------------------
+# IMÁGENES
+# ---------------------
 
-# -------------------------
-# IMÁGENES: versión pulida
-# -------------------------
-
-def extract_name_queries(text):
+def extract_queries(text):
     names = []
 
-    battle_patterns = [
-        r"(Batalla de [A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ\s\-]+)",
-        r"(Guerra de [A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ\s\-]+)",
-        r"(Sitio de [A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ\s\-]+)",
-        r"(Tratado de [A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ\s\-]+)",
-        r"(Paz de [A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ\s\-]+)",
-        r"(Capitulación de [A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑáéíóúñ\s\-]+)"
+    patterns = [
+        r"(Batalla de [A-ZÁÉÍÓÚÑ][^,.;]*)",
+        r"(Guerra de [A-ZÁÉÍÓÚÑ][^,.;]*)",
+        r"(Sitio de [A-ZÁÉÍÓÚÑ][^,.;]*)",
+        r"(Tratado de [A-ZÁÉÍÓÚÑ][^,.;]*)",
+        r"(Paz de [A-ZÁÉÍÓÚÑ][^,.;]*)"
     ]
 
-    for pat in battle_patterns:
-        for m in re.finditer(pat, text):
-            candidate = m.group(1).strip()
-            if candidate not in names:
-                names.append(candidate)
+    for p in patterns:
+        for m in re.finditer(p, text):
+            names.append(m.group(1).strip())
 
-    pattern = re.compile(
-        r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+"
-        r"(?:\s+de\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*"
-        r"(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)"
-    )
+    pattern2 = re.compile(r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+de\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)")
+    for m in pattern2.findall(text):
+        names.append(m.strip())
 
-    raw_names = pattern.findall(text)
+    clean = []
+    for n in names:
+        if len(n.split()) >= 2:
+            if n not in clean:
+                clean.append(n)
+    return clean
 
-    for name in raw_names:
-        name = name.strip()
-        parts = name.split()
-        if len(parts) <= 1:
-            continue
-        if name not in names:
-            names.append(name)
-
-    return names
-
-
-def fetch_wikipedia_image_url(event):
-    headers = {"User-Agent": USER_AGENT}
-    base_api = "https://es.wikipedia.org/w/api.php"
-
-    names = extract_name_queries(event["text"])
+def fetch_image(event):
+    names = extract_queries(event["text"])
     print("Nombres detectados:", names)
 
     if not names:
         print("No imagen lógica")
         return None
 
+    base = "https://es.wikipedia.org/w/api.php"
+
     for name in names:
         try:
-            params_search = {
-                "action": "query",
-                "format": "json",
-                "list": "search",
-                "srsearch": name,
-                "srlimit": 1,
-            }
-            r = requests.get(base_api, params=params_search, headers=headers, timeout=15)
-            r.raise_for_status()
+            r = requests.get(base, params={
+                "action": "query","format": "json","list": "search","srsearch": name,"srlimit": 1
+            }, timeout=10)
             data = r.json()
             results = data.get("query", {}).get("search", [])
             if not results:
                 continue
 
-            page_title = results[0].get("title")
-            if not page_title:
-                continue
+            title = results[0]["title"]
+            r2 = requests.get(base, params={
+                "action":"query","format":"json","prop":"pageimages",
+                "piprop":"original|thumbnail","pithumbsize":1200,"titles":title
+            }, timeout=10)
+            pages = r2.json()["query"]["pages"]
 
-            params_pageimg = {
-                "action": "query",
-                "format": "json",
-                "prop": "pageimages",
-                "piprop": "original|thumbnail",
-                "pithumbsize": 1200,
-                "titles": page_title,
-            }
-            r2 = requests.get(base_api, params=params_pageimg, headers=headers, timeout=15)
-            r2.raise_for_status()
-            data2 = r2.json()
-            pages = data2.get("query", {}).get("pages", {})
-            for _, page in pages.items():
-                original = page.get("original", {})
-                thumbnail = page.get("thumbnail", {})
-                img_url = original.get("source") or thumbnail.get("source")
-                if img_url and "upload.wikimedia.org" in img_url:
-                    print("Imagen buena:", img_url)
-                    return img_url
-
-        except Exception:
+            for _,p in pages.items():
+                url = p.get("original",{}).get("source") or p.get("thumbnail",{}).get("source")
+                if url and "upload.wikimedia.org" in url:
+                    print("Imagen buena:", url)
+                    return url
+        except:
             pass
 
     print("Sin imagen adecuada")
     return None
 
-
-def download_image(url, filename="tweet_image.jpg"):
-    headers = {"User-Agent": USER_AGENT}
-    r = requests.get(url, headers=headers, timeout=25)
-    r.raise_for_status()
-    with open(filename, "wb") as f:
+def download_image(url):
+    r = requests.get(url, timeout=15)
+    with open("img.jpg","wb") as f:
         f.write(r.content)
-    return filename
+    return "img.jpg"
 
+# ---------------------
+# OPENAI TEXTO
+# ---------------------
 
-# -----------------
-# Texto OpenAI
-# -----------------
-
-def generate_headline_tweet(today_year, today_month_name, today_day, event):
-    today_str = f"{today_day} de {today_month_name} de {today_year}"
-    event_year = event["year"]
-    event_text = event["text"]
+def generate_headline(y, mname, d, ev):
+    today = f"{d} de {mname} de {y}"
+    yev = ev["year"]
     hashtags = " ".join(DEFAULT_HASHTAGS)
 
-    prompt_user = f"""
-Fecha de hoy: {today_str}.
-Efeméride seleccionada (año {event_year}):
+    prompt = f"""
+Escribe un único tuit:
 
-\"\"\"{event_text}\"\"\"
+"🇪🇸 {today}: En tal día como hoy del año {yev}, ... {hashtags}"
 
-
-Escribe UN SOLO tuit:
-
-"🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ... {hashtags}"
-
-Reglas:
-- Máximo 260 caracteres.
-- Debe empezar EXACTAMENTE por: "🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
-- Estilo divulgativo español.
-- Sin emojis adicionales, sin URLs, sin saltos de línea.
+Hecho histórico:
+{ev["text"]}
 """
 
-    completion = client.chat.completions.create(
+    out = client.chat.completions.create(
         model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "Eres un divulgador español."},
-            {"role": "user", "content": prompt_user},
-        ],
-        temperature=0.4,
-        max_tokens=200,
-    )
+        messages=[{"role":"user","content":prompt}],
+        max_tokens=180
+    ).choices[0].message.content.strip()
 
-    text = completion.choices[0].message.content.strip()
+    if len(out) > 275:
+        out = out[:272] + "..."
 
-    prefix = f"🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
-    if not text.startswith(prefix):
-        core_desc = event_text
-        if len(core_desc) > 150:
-            core_desc = core_desc[:147] + "..."
-        text = f"{prefix} {core_desc} {hashtags}"
+    return out
 
-    if len(text) > 275:
-        text = text[:272] + "..."
+def generate_followups(ev):
+    prompt = f"""
+Escribe entre 1 y 5 tuits cortos explicando el contexto español del siguiente hecho:
 
-    return text
+{ev["text"]}
 
-
-def generate_followup_tweets(today_year, today_month_name, today_day, event):
-    today_str = f"{today_day} de {today_month_name} de {today_year}"
-    event_year = event["year"]
-    event_text = event["text"]
-
-    prompt_user = f"""
-Escribe entre 1 y 5 tuits de un hilo sobre:
-
-\"\"\"{event_text}\"\"\"
-
-Reglas:
-- Máx 260 caracteres por tuit.
-- NO hashtags, NO emojis.
-- NO repetir la frase del tuit titular.
-Devuélvelos SOLO en JSON: ["...", "..."]
+Devuélvelos SOLO en JSON así:
+["texto1","texto2"]
 """
 
-    completion = client.chat.completions.create(
+    out = client.chat.completions.create(
         model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "Eres un divulgador español."},
-            {"role": "user", "content": prompt_user},
-        ],
-        temperature=0.6,
-        max_tokens=400,
-    )
-
-    raw = completion.choices[0].message.content.strip()
+        messages=[{"role":"user","content":prompt}],
+        max_tokens=350
+    ).choices[0].message.content.strip()
 
     try:
-        data = json.loads(raw)
-        tweets = [t[:275] for t in data if isinstance(t, str)]
+        arr = json.loads(out)
+        return arr[:5]
     except:
-        tweets = []
+        return []
 
-    return tweets[:5]
+# ---------------------
+# PUBLICACIÓN TWITTER
+# ---------------------
 
-
-def get_twitter_client_and_api():
-    if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
-        raise RuntimeError("Faltan claves de Twitter/X.")
-
-    client_tw = tweepy.Client(
+def twitter_clients():
+    c = tweepy.Client(
         consumer_key=TW_API_KEY,
         consumer_secret=TW_API_SECRET,
         access_token=TW_ACCESS_TOKEN,
         access_token_secret=TW_ACCESS_SECRET,
-        bearer_token=TW_BEARER_TOKEN,
+        bearer_token=TW_BEARER_TOKEN
     )
-
     auth = tweepy.OAuth1UserHandler(
         TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
     )
     api_v1 = tweepy.API(auth)
+    return c, api_v1
 
-    return client_tw, api_v1
-
-
-def post_thread(headline, followups, event):
-    client_tw, api_v1 = get_twitter_client_and_api()
+def post_thread(head, follow, ev):
+    client_tw, api_v1 = twitter_clients()
 
     media_ids = None
-    try:
-        img_url = fetch_wikipedia_image_url(event)
-        if img_url:
-            img_path = download_image(img_url)
-            media = api_v1.media_upload(img_path)
-            media_ids = [media.media_id_string]
-    except:
-        media_ids = None
+    img_url = fetch_image(ev)
+    if img_url:
+        img_path = download_image(img_url)
+        media = api_v1.media_upload(img_path)
+        media_ids = [media.media_id_string]
 
     if media_ids:
-        resp = client_tw.create_tweet(text=headline, media_ids=media_ids)
+        resp = client_tw.create_tweet(text=head, media_ids=media_ids)
     else:
-        resp = client_tw.create_tweet(text=headline)
+        resp = client_tw.create_tweet(text=head)
 
-    tweet_id = resp.data.get("id")
-    parent_id = tweet_id
+    parent = resp.data["id"]
 
-    for t in followups:
-        try:
-            resp = client_tw.create_tweet(text=t, in_reply_to_tweet_id=parent_id)
-            parent_id = resp.data.get("id")
-        except:
-            break
+    for t in follow:
+        r = client_tw.create_tweet(text=t, in_reply_to_tweet_id=parent)
+        parent = r.data["id"]
 
+# ---------------------
+# MAIN
+# ---------------------
 
 def main():
-    today_year, today_month, today_day, today_month_name = today_info()
+    y, m, d, mname = today_info()
 
+    print("Obteniendo eventos…")
     try:
-        events = fetch_hoyenlahistoria_events()
-    except:
+        events = fetch_events()
+    except Exception as e:
+        print("ERROR obteniendo eventos:", e)
         return
 
     if not events:
+        print("No hay eventos")
         return
 
-    best = choose_best_event(events)
+    print("Escogiendo mejor evento…")
+    best = choose_best(events)
+
     if not best:
+        print("No evento adecuado")
         return
 
-    try:
-        headline = generate_headline_tweet(today_year, today_month_name, today_day, best)
-    except:
-        return
+    print("Evento elegido:", best)
 
-    try:
-        followups = generate_followup_tweets(today_year, today_month_name, today_day, best)
-    except:
-        followups = []
+    headline = generate_headline(y, mname, d, best)
+    print("Titular:", headline)
 
-    try:
-        post_thread(headline, followups, best)
-    except:
-        pass
+    followups = generate_followups(best)
+    print("Followups:", followups)
 
+    print("Publicando hilo…")
+    post_thread(headline, followups, best)
 
-if __name__ == "__main__":
+    print("Hilo publicado.")
+
+if __name__=="__main__":
     main()
