@@ -253,6 +253,95 @@ def choose_best_event(events):
     return best
 
 
+# ----------------- IMÁGENES: Wikimedia Commons (solo dominio público / CC0) ----------------- #
+
+def fetch_commons_image_url(event):
+    """
+    Busca una imagen en Wikimedia Commons relacionada con el texto del evento.
+    Solo acepta imágenes con licencia 'Public domain' o 'CC0'.
+    Devuelve la URL de la imagen (thumb) o None si no encuentra nada adecuado.
+    """
+    base_url = "https://commons.wikimedia.org/w/api.php"
+
+    # Intento 1: buscar usando el texto completo del evento (recortado)
+    query = event["text"]
+    if len(query) > 120:
+        query = query[:120]
+
+    def search_commons(q):
+        params = {
+            "action": "query",
+            "format": "json",
+            "prop": "imageinfo",
+            "generator": "search",
+            "gsrsearch": q,
+            "gsrlimit": 10,
+            "gsrnamespace": 6,  # File:
+            "iiprop": "url|extmetadata",
+            "iiurlwidth": 1200,
+            "iiextmetadata": 1,
+        }
+        headers = {"User-Agent": USER_AGENT}
+        r = requests.get(base_url, params=params, headers=headers, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        pages = data.get("query", {}).get("pages", {})
+        candidates = []
+        for _, page in pages.items():
+            infos = page.get("imageinfo", [])
+            if not infos:
+                continue
+            ii = infos[0]
+            url = ii.get("thumburl") or ii.get("url")
+            if not url:
+                continue
+            extmeta = ii.get("extmetadata", {})
+            lic = extmeta.get("LicenseShortName", {}).get("value", "").lower()
+            # Aceptamos solo dominio público / CC0
+            if "public domain" in lic or "cc0" in lic:
+                candidates.append(url)
+        return candidates
+
+    # Búsqueda principal
+    try:
+        candidates = search_commons(query)
+        if candidates:
+            print(f"✅ Encontradas {len(candidates)} imágenes PD/CC0 en Commons para: {query!r}")
+            return candidates[0]
+    except Exception as e:
+        print("⚠️ Error buscando imagen en Commons (query principal):", e)
+
+    # Intento 2: búsqueda más genérica si la anterior no da nada
+    generic_queries = [
+        "Imperio español mapa",
+        "Historia de España pintura",
+        "Tercios españoles",
+    ]
+    for gq in generic_queries:
+        try:
+            candidates = search_commons(gq)
+            if candidates:
+                print(f"✅ Encontradas {len(candidates)} imágenes PD/CC0 en Commons para búsqueda genérica: {gq!r}")
+                return candidates[0]
+        except Exception as e:
+            print("⚠️ Error buscando imagen en Commons (query genérica):", e)
+
+    print("⚠️ No se ha encontrado imagen adecuada en Wikimedia Commons.")
+    return None
+
+
+def download_image(url, filename="tweet_image.jpg"):
+    """
+    Descarga la imagen en 'url' a un fichero local y devuelve la ruta.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    r = requests.get(url, headers=headers, timeout=25)
+    r.raise_for_status()
+    with open(filename, "wb") as f:
+        f.write(r.content)
+    return filename
+
+
 # ----------------- Generación de TEXTO con OpenAI ----------------- #
 
 def generate_headline_tweet(today_year, today_month_name, today_day, event):
@@ -311,7 +400,6 @@ Reglas importantes:
     # Seguridad extra: si por lo que sea no empieza como debe, lo forzamos mínimamente
     prefix = f"🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
     if not text.startswith(prefix):
-        # Extraemos solo la parte descriptiva
         core_desc = event_text
         if len(core_desc) > 150:
             core_desc = core_desc[:147].rstrip() + "..."
@@ -328,9 +416,7 @@ def generate_followup_tweets(today_year, today_month_name, today_day, event):
     - Sin fecha ni fórmula 'En tal día como hoy...'
     - Sin hashtags.
     - Sin emojis.
-    - Explican por qué ese hecho/f
-
-ue importante para España/Imperio, consecuencias, etc.
+    - Explican por qué ese hecho/figura fue importante para España/Imperio.
     Devuelve una lista de strings.
     """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
@@ -394,7 +480,6 @@ FORMATO DE RESPUESTA:
                     text = item.strip()
                     if not text:
                         continue
-                    # Recorte de seguridad
                     if len(text) > 275:
                         text = text[:272].rstrip() + "..."
                     tweets.append(text)
@@ -404,16 +489,15 @@ FORMATO DE RESPUESTA:
         print(raw)
         tweets = []
 
-    # Garantizar entre 1 y 5 si hay algo; si no hay nada, devolvemos lista vacía
     if len(tweets) > 5:
         tweets = tweets[:5]
 
     return tweets
 
 
-# ----------------- Publicación en X (API v2) ----------------- #
+# ----------------- Publicación en X (API v2 + media upload v1.1) ----------------- #
 
-def get_twitter_client():
+def get_twitter_client_and_api():
     if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
         raise RuntimeError("Faltan claves de Twitter/X en las variables de entorno.")
 
@@ -433,24 +517,50 @@ def get_twitter_client():
         access_token_secret=TW_ACCESS_SECRET,
         bearer_token=TW_BEARER_TOKEN,
     )
-    return client_tw
+
+    # API v1.1 SOLO para subir media (permitido en tu plan)
+    auth = tweepy.OAuth1UserHandler(
+        TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
+    )
+    api_v1 = tweepy.API(auth)
+
+    return client_tw, api_v1
 
 
-def post_thread(headline, followups):
+def post_thread(headline, followups, event):
     """
-    Publica el tuit titular y, si hay followups, va respondiendo en hilo.
+    Publica el tuit titular (con imagen si se encuentra) y, si hay followups, va respondiendo en hilo.
     """
-    client_tw = get_twitter_client()
+    client_tw, api_v1 = get_twitter_client_and_api()
 
-    # Publicar titular
-    resp = client_tw.create_tweet(text=headline)
+    # 1) Intentar conseguir imagen de Commons
+    media_ids = None
+    try:
+        img_url = fetch_commons_image_url(event)
+        if img_url:
+            img_path = download_image(img_url)
+            media = api_v1.media_upload(img_path)
+            media_ids = [media.media_id_string]
+            print(f"✅ Imagen subida a X con media_id={media.media_id_string}")
+        else:
+            print("ℹ️ No se adjuntará imagen en el tuit titular (no se encontró adecuada).")
+    except Exception as e:
+        print("⚠️ Error subiendo imagen a X, se publicará sin imagen:", e)
+        media_ids = None
+
+    # 2) Publicar titular (con o sin imagen)
+    if media_ids:
+        resp = client_tw.create_tweet(text=headline, media_ids=media_ids)
+    else:
+        resp = client_tw.create_tweet(text=headline)
+
     print("DEBUG create_tweet (headline) response:", resp)
     tweet_id = resp.data.get("id")
     if not tweet_id:
         print("⚠️ No se obtuvo ID del tuit titular, no se puede continuar el hilo.")
         return
 
-    # Publicar respuestas encadenadas
+    # 3) Publicar respuestas encadenadas
     parent_id = tweet_id
     for t in followups:
         try:
@@ -525,9 +635,9 @@ def main():
     for i, t in enumerate(followups, start=2):
         print(f"[Tuit {i}] {t} (len={len(t)})")
 
-    # 5) Publicar hilo en X
+    # 5) Publicar hilo en X (con imagen si se encontró)
     try:
-        post_thread(headline, followups)
+        post_thread(headline, followups, best)
         print("✅ Hilo publicado correctamente.")
     except Exception as e:
         print("❌ Error publicando el hilo en Twitter/X:", e)
