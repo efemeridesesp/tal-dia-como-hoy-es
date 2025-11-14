@@ -1,363 +1,288 @@
 import os
-import datetime
-import time
-import json
-
 import requests
+import datetime
 import pytz
-import tweepy
+import re
+from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# =========================
-# CONFIGURACIÓN GENERAL
-# =========================
-
+# Zona horaria de referencia
 TZ = "Europe/Madrid"
 
+# Hashtags fijos
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 
+# Palabras clave para priorizar eventos "imperiales/españoles"
 KEYWORDS_PRIORITY = [
-    "Armada", "Descubrimiento", "Reyes Católicos", "Imperio", "Monarquía Hispánica",
-    "Magallanes", "Elcano", "Lepanto", "América", "Pacífico", "Galeón", "Naval",
-    "Ciencia", "Cultural", "Constitución", "Exploración", "Cartagena de Indias",
-    "Sevilla", "Madrid", "Toledo", "Granada", "Castilla", "Aragón", "España"
+    "Imperio español", "Reyes Católicos", "Armada", "Flota", "Galeón",
+    "América", "Virreinato", "Nueva España", "Filipinas", "Pacífico",
+    "batalla", "victoria", "derrota", "guerra", "naval",
+    "Carlos V", "Felipe II", "Felipe III", "Felipe IV",
+    "Granada", "Castilla", "Aragón", "Toledo", "Sevilla", "Madrid",
+    "España", "español", "española"
 ]
 
-MESES_ES = {
-    1: "enero",
-    2: "febrero",
-    3: "marzo",
-    4: "abril",
-    5: "mayo",
-    6: "junio",
-    7: "julio",
-    8: "agosto",
-    9: "septiembre",
-    10: "octubre",
-    11: "noviembre",
-    12: "diciembre",
-}
+# Claves de X (Twitter) desde los secrets del repositorio
+TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
+TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
+TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
+TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
 
-# Claves de X (Twitter)
-TWITTER_API_KEY = os.getenv("TWITTER_API_KEY", "")
-TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
-TWITTER_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
-TWITTER_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
-TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
-
-# Cliente OpenAI (usa OPENAI_API_KEY del entorno)
-client = OpenAI()
+# Cliente de OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# =========================
-# FUNCIONES DE FECHA
-# =========================
+# ----------------- Utilidades de fecha ----------------- #
 
-def today_parts():
+def today_info():
+    """Devuelve (año, mes, día, nombre_mes) en Europa/Madrid."""
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
-    return now.year, now.month, now.day
+    year = now.year
+    month = now.month
+    day = now.day
+
+    meses = [
+        "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+    ]
+    month_name = meses[month]
+    return year, month, day, month_name
 
 
-def fecha_larga_hoy():
-    year, month, day = today_parts()
-    return f"{day} de {MESES_ES[month]} de {year}", year, month, day
+# ----------------- Scraper de hoyenlahistoria.com ----------------- #
 
-
-# =========================
-# RED CON REINTENTOS
-# =========================
-
-def safe_request(url, params=None, headers=None, tries=5, wait=3):
-    if headers is None:
-        headers = {}
-    if "User-Agent" not in headers:
-        headers["User-Agent"] = USER_AGENT
-
-    for i in range(tries):
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=15)
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            if i < tries - 1:
-                print(f"⚠️ Error al conectar ({e}). Reintentando en {wait} segundos...")
-                time.sleep(wait)
-            else:
-                raise
-
-
-# =========================
-# WIKIDATA + WIKIPEDIA
-# =========================
-
-def fetch_wikidata_events(month: int, day: int):
+def fetch_hoyenlahistoria_events():
     """
-    Devuelve eventos de Wikidata (lista de dicts) filtrados por España.
+    Lee https://www.hoyenlahistoria.com/efemerides.php y devuelve
+    una lista de eventos con campos: year, text, raw.
     """
-    endpoint = "https://query.wikidata.org/sparql"
-    query = f"""
-    SELECT ?item ?itemLabel ?eventDate ?wpES WHERE {{
-      ?item wdt:P31/wdt:P279* wd:Q1190554.
-      ?item wdt:P585 ?eventDate.
-      FILTER(MONTH(?eventDate) = {month} && DAY(?eventDate) = {day})
-      OPTIONAL {{ ?item wdt:P17 ?country . }}
-      OPTIONAL {{ ?item wdt:P495 ?origin . }}
-      OPTIONAL {{ ?item wdt:P276 ?place . }}
-      BIND(
-        IF( (?country = wd:Q29) || (?origin = wd:Q29) || EXISTS {{
-            ?place wdt:P17 wd:Q29
-        }}, 1, 0) as ?isSpanish
-      )
-      FILTER(?isSpanish = 1)
-      OPTIONAL {{
-        ?wpES schema:about ?item ;
-              schema:isPartOf <https://es.wikipedia.org/> .
-      }}
-      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "es,en". }}
-    }}
-    ORDER BY DESC(?eventDate)
-    LIMIT 20
-    """
-    headers = {
-        "Accept": "application/sparql-results+json",
-        "User-Agent": USER_AGENT,
-    }
+    url = "https://www.hoyenlahistoria.com/efemerides.php"
+    headers = {"User-Agent": USER_AGENT}
 
-    r = safe_request(endpoint, params={"query": query}, headers=headers)
-    data = r.json()["results"]["bindings"]
+    resp = requests.get(url, headers=headers, timeout=25)
+    resp.raise_for_status()
 
+    soup = BeautifulSoup(resp.text, "html.parser")
     events = []
-    for b in data:
+
+    # Recorremos todos los <li> y nos quedamos con los que empiezan por un año
+    for li in soup.find_all("li"):
+        text = " ".join(li.stripped_strings)
+        if not text:
+            continue
+
+        # Busca "AAAA ..." o "AAAA a.C. ..."
+        m = re.match(r"^(\d+)\s*(a\.C\.)?\s*(.*)", text)
+        if not m:
+            continue
+
+        year_str, era, rest = m.groups()
+        try:
+            year = int(year_str)
+        except ValueError:
+            continue
+
+        # Si es a.C., lo dejamos como año negativo por si algún día lo quisieras usar
+        if era:
+            year = -year
+
+        body = rest.strip()
+        if not body:
+            continue
+
         events.append({
-            "label": b.get("itemLabel", {}).get("value", ""),
-            "date": b.get("eventDate", {}).get("value", ""),
-            "wp_es": b.get("wpES", {}).get("value", ""),
-            "qid": b.get("item", {}).get("value", "").split("/")[-1],
+            "year": year,
+            "text": body,
+            "raw": text,
+            "source": "hoyenlahistoria"
         })
+
     return events
 
 
 def score_event(ev):
+    """
+    Da una puntuación a cada evento según palabras clave y época histórica.
+    Cuanto más "España / Imperio", más puntos.
+    """
+    text = ev["text"]
+    year = ev["year"]
+    t_low = text.lower()
+
     score = 0
-    label = ev["label"]
+
+    # Puntos por menciones explícitas a España
+    if "españa" in t_low or "español" in t_low or "española" in t_low:
+        score += 5
+
+    # Palabras clave de prioridad
     for i, kw in enumerate(KEYWORDS_PRIORITY[::-1], start=1):
-        if kw.lower() in label.lower():
+        if kw.lower() in t_low:
             score += i
-    try:
-        year = int(ev["date"][:4])
-        score += max(0, (year - 1500) / 200.0)
-    except Exception:
-        pass
+
+    # Bonus por siglos "interesantes" (aprox. XV–XIX)
+    if 1400 <= year <= 1899:
+        score += 3
+
     return score
 
 
-def choose_best(events):
+def choose_best_event(events):
+    """
+    Elige el mejor evento, priorizando los que tengan score > 0.
+    Si todos son 0, elige el que más score tenga igualmente.
+    """
     if not events:
         return None
-    return sorted(events, key=score_event, reverse=True)[0]
+
+    # Calculamos score de todos
+    for ev in events:
+        ev["score"] = score_event(ev)
+
+    spanish_like = [e for e in events if e["score"] > 0]
+
+    if spanish_like:
+        candidates = spanish_like
+    else:
+        candidates = events  # si un día raro no hay nada español, usamos algo general
+
+    best = max(candidates, key=lambda e: e["score"])
+    return best
 
 
-def fetch_wikipedia_summary(title_or_url: str):
+# ----------------- Generación de texto con OpenAI ----------------- #
+
+def generate_openai_tweet(today_year, today_month_name, today_day, event):
     """
-    Usa la API de Wikipedia para obtener un resumen en español.
+    Pide a OpenAI que redacte el tuit con el formato:
+
+    '14 de noviembre de 2025: En tal día como hoy del año XXXX, ... #TalDiaComoHoy #España #HistoriaDeEspaña #Efemérides'
     """
-    if not title_or_url:
-        return {"title": "", "extract": "", "url": ""}
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Falta OPENAI_API_KEY en las variables de entorno.")
 
-    title = title_or_url
-    if "wikipedia.org" in title_or_url:
-        title = title_or_url.rstrip("/").split("/")[-1]
+    today_str = f"{today_day} de {today_month_name} de {today_year}"
+    event_year = event["year"]
+    event_text = event["text"]
 
-    url = f"https://es.wikipedia.org/api/rest_v1/page/summary/{title}"
-
-    try:
-        r = safe_request(url, headers={"User-Agent": USER_AGENT})
-    except Exception:
-        return {"title": "", "extract": "", "url": ""}
-
-    j = r.json()
-    return {
-        "title": j.get("title", ""),
-        "extract": j.get("extract", ""),
-        "url": j.get("content_urls", {}).get("desktop", {}).get("page", ""),
-    }
-
-
-# =========================
-# OPENAI → TWEET FORMATEADO
-# =========================
-
-def generate_openai_tweet(fecha_hoy_str: str, event_year: int, event_label: str,
-                          summary_text: str, wikipedia_url: str) -> str:
-    """
-    Usa OpenAI solo para redactar el texto, NO para decidir la efeméride.
-    El hecho histórico viene de Wikidata/Wikipedia.
-    Formato obligatorio:
-    '{fecha_hoy}: En tal día como hoy del año XXXX, ...'
-    """
     hashtags = " ".join(DEFAULT_HASHTAGS)
 
-    resumen_corto = summary_text
-    if resumen_corto and len(resumen_corto) > 400:
-        resumen_corto = resumen_corto[:400] + "…"
+    prompt_user = f"""
+Fecha de hoy: {today_str}.
+Efeméride seleccionada (año {event_year}) procedente de un listado de efemérides históricas:
 
-    prompt = f"""
-Vas a redactar UN ÚNICO tweet de efeméride sobre historia de España.
+\"\"\"{event_text}\"\"\"
 
-Los datos históricos SON FIJOS y NO puedes cambiarlos:
-- Fecha de hoy: {fecha_hoy_str}
-- Año del suceso: {event_year}
-- Nombre del evento: {event_label}
-- Descripción/resumen (puedes condensarla): {resumen_corto}
-- Enlace de referencia (puedes omitirlo si no cabe): {wikipedia_url}
 
-Formato OBLIGATORIO DEL TWEET (respétalo al 100%):
-- Debe comenzar EXACTAMENTE así (incluyendo dos puntos y espacio):
-  "{fecha_hoy_str}: En tal día como hoy del año {event_year},"
-- Después de esa frase, en una sola oración breve, explica qué ocurrió.
-- Termina el tweet con EXACTAMENTE estos hashtags y en este orden:
-  {hashtags}
-- No añadas otros hashtags.
-- No añadas más emojis (puedes mantener solo la bandera inicial si la añades tú, pero en este caso NO la usamos porque ya empieza con la fecha).
-- No añadas comillas ni texto fuera del propio tweet.
-- Todo el tweet debe tener como máximo 260 caracteres.
+Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato:
 
-Tu tarea:
-- Condensa el hecho histórico en una frase breve, sin cambiar el año ni el sentido del evento.
-- Usa un tono divulgativo y sobrio (sin panfleto).
+\"{today_str}: En tal día como hoy del año {event_year}, ... {hashtags}\"
 
-Devuélveme SOLO el texto del tweet, listo para publicar.
+Reglas importantes:
+- Máximo 260 caracteres en total (incluyendo los hashtags).
+- Respeta el comienzo fijo: "{today_str}: En tal día como hoy del año {event_year},".
+- Tono divulgativo y positivo, sin emojis, sin URLs y sin mencionar la fuente.
+- No añadas más hashtags que estos cuatro ni cambies su texto: {hashtags}.
+- No uses saltos de línea, todo debe ir en una sola frase.
 """
 
     completion = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "Eres un historiador de España y community manager. "
-                    "Nunca alteras los datos históricos proporcionados, solo los redactas."
+                    "Eres un divulgador de historia de España y del Imperio español. "
+                    "Escribes tuits breves y claros respetando estrictamente el formato pedido."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": prompt_user},
         ],
+        temperature=0.4,
+        max_tokens=180,
     )
 
-    tweet = completion.choices[0].message.content.strip()
+    text = completion.choices[0].message.content.strip()
 
-    # Seguridad extra: recortar a 275 por si acaso
-    if len(tweet) > 275:
-        tweet = tweet[:272] + "…"
+    # Por seguridad recortamos a 275 caracteres máximo
+    if len(text) > 275:
+        text = text[:272].rstrip() + "..."
 
-    # Comprobamos que respeta el prefijo
-    prefix = f"{fecha_hoy_str}: En tal día como hoy del año {event_year},"
-    if not tweet.startswith(prefix):
-        print("❌ OpenAI no respetó el formato, no se publicará.")
-        print("TWEET GENERADO:", tweet)
-        return ""
-
-    return tweet
+    return text
 
 
-# =========================
-# PUBLICAR EN X (TWITTER)
-# =========================
+# ----------------- Publicación en X (Twitter) ----------------- #
 
-def post_to_twitter(text: str):
-    if not text:
-        print("⚠️ Texto vacío, no se publica.")
-        return
+def post_to_twitter(text):
+    """Publica el tuit usando Tweepy y OAuth1.0a (v1.1)."""
+    import tweepy
 
-    print(
-        "DEBUG Twitter keys present:",
-        bool(TWITTER_API_KEY),
-        bool(TWITTER_API_SECRET),
-        bool(TWITTER_ACCESS_TOKEN),
-        bool(TWITTER_ACCESS_SECRET),
-        bool(TWITTER_BEARER_TOKEN),
+    if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET):
+        raise RuntimeError("Faltan claves de Twitter/X en las variables de entorno.")
+
+    auth = tweepy.OAuth1UserHandler(
+        TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
     )
+    api = tweepy.API(auth)
 
-    client_tw = tweepy.Client(
-        consumer_key=TWITTER_API_KEY,
-        consumer_secret=TWITTER_API_SECRET,
-        access_token=TWITTER_ACCESS_TOKEN,
-        access_token_secret=TWITTER_ACCESS_SECRET,
-        bearer_token=TWITTER_BEARER_TOKEN,
-    )
-
-    resp = client_tw.create_tweet(text=text)
-    print("DEBUG create_tweet response:", resp)
+    # Esto falla con 401 si algo está mal, lo cual nos viene bien para depurar
+    api.verify_credentials()
+    api.update_status(status=text)
 
 
-# =========================
-# MAIN
-# =========================
+# ----------------- Main ----------------- #
 
 def main():
-    fecha_hoy_str, year_today, month, day = fecha_larga_hoy()
-    fecha_corta_str = f"{day:02d}/{month:02d}"
+    today_year, today_month, today_day, today_month_name = today_info()
 
-    print(f"📅 Hoy es {fecha_hoy_str} (día/mes: {fecha_corta_str})")
+    print(f"Hoy es {today_day}/{today_month}/{today_year} ({today_month_name}).")
 
-    # 1) Obtener eventos de Wikidata
+    # 1) Obtener eventos de hoy en la web
     try:
-        events = fetch_wikidata_events(month, day)
+        events = fetch_hoyenlahistoria_events()
+        print(f"Se han encontrado {len(events)} eventos en hoyenlahistoria.com")
     except Exception as e:
-        print("❌ Error serio con Wikidata:", e)
+        print("❌ Error obteniendo eventos de hoyenlahistoria.com:", e)
+        print("No se publicará ningún tuit hoy.")
         return
 
     if not events:
-        print("ℹ️ No se han encontrado efemérides en Wikidata para hoy. No se publica nada.")
+        print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    best = choose_best(events)
-    print("✅ Evento elegido de Wikidata:", json.dumps(best, ensure_ascii=False))
-
-    # 2) Año del suceso
-    try:
-        event_year = int(best["date"][:4])
-    except Exception:
-        print("❌ No se ha podido extraer el año del evento. No se publica.")
+    # 2) Elegir el mejor evento
+    best = choose_best_event(events)
+    if not best:
+        print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
         return
 
-    # 3) Resumen de Wikipedia (si hay URL)
-    summary = {"title": "", "extract": "", "url": ""}
-    if best.get("wp_es"):
-        summary = fetch_wikipedia_summary(best["wp_es"])
+    print("Evento elegido:")
+    print(f"- Año: {best['year']}")
+    print(f"- Texto: {best['text']}")
+    print(f"- Score: {best.get('score', 'N/A')}")
 
-    event_label = summary["title"] or best["label"]
-    summary_text = summary["extract"]
-    wikipedia_url = summary["url"]
-
-    # 4) Generar tweet con OpenAI
+    # 3) Generar el texto del tuit con OpenAI
     try:
-        tweet = generate_openai_tweet(
-            fecha_hoy_str=fecha_hoy_str,
-            event_year=event_year,
-            event_label=event_label,
-            summary_text=summary_text,
-            wikipedia_url=wikipedia_url,
-        )
+        tweet_text = generate_openai_tweet(today_year, today_month_name, today_day, best)
     except Exception as e:
-        print("❌ Error generando tweet con OpenAI:", e)
-        return
+        print("❌ Error al generar el tuit con OpenAI:", e)
+        raise
 
-    if not tweet:
-        print("⚠️ No se generó un tweet válido. No se publica.")
-        return
+    print("Tuit generado:")
+    print(tweet_text)
+    print(f"Largo: {len(tweet_text)} caracteres")
 
-    print("✅ Tweet generado:")
-    print(tweet)
-
-    # 5) Publicar
+    # 4) Publicar en X
     try:
-        post_to_twitter(tweet)
-        print("✅ Tweet publicado correctamente.")
+        post_to_twitter(tweet_text)
+        print("✅ Tuit publicado correctamente.")
     except Exception as e:
-        print("❌ Error publicando el tweet en X:", e)
+        print("❌ Error publicando en Twitter/X:", e)
+        raise
 
 
 if __name__ == "__main__":
