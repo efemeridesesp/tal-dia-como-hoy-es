@@ -253,20 +253,62 @@ def choose_best_event(events):
     return best
 
 
-# ----------------- IMÁGENES: Wikimedia Commons (solo dominio público / CC0) ----------------- #
+# ----------------- IMÁGENES: Wikimedia Commons (mejor búsqueda por nombres propios) ----------------- #
+
+def extract_name_queries(text):
+    """
+    A partir del texto del evento, extrae posibles nombres propios
+    ("Catalina de Aragón", "Arturo Tudor", "Reyes Católicos", etc.)
+    y construye queries para Wikimedia Commons.
+    """
+    # Patrón para secuencias Capitalizadas (con posibles "de" intermedios)
+    pattern = re.compile(
+        r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+"
+        r"(?:\s+de\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*"
+        r"(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)"
+    )
+
+    raw_names = pattern.findall(text)
+    candidates = []
+
+    # Palabras sueltas genéricas que NO queremos tomar como nombre en solitario
+    generic_single_words = {
+        "El", "La", "Los", "Las",
+        "Rey", "Reina", "Reyes", "Príncipe", "Princesa",
+        "Guerra", "Batalla", "Revolución", "Constitución",
+        "Partido", "Imperio", "Monarquía",
+    }
+
+    for name in raw_names:
+        name = name.strip().strip(",.;:()")
+        if not name:
+            continue
+        # Si es una sola palabra y genérica, fuera
+        parts = name.split()
+        if len(parts) == 1 and parts[0] in generic_single_words:
+            continue
+        if name not in candidates:
+            candidates.append(name)
+
+    # Para cada nombre, generamos varias queries
+    queries = []
+    for name in candidates:
+        queries.append(name)
+        queries.append(f"{name} retrato")
+        queries.append(f"{name} pintura")
+
+    return queries
+
 
 def fetch_commons_image_url(event):
     """
-    Busca una imagen en Wikimedia Commons relacionada con el texto del evento.
+    Busca una imagen en Wikimedia Commons relacionada con el texto del evento,
+    priorizando nombres propios (Catalina de Aragón, etc.).
     Solo acepta imágenes con licencia 'Public domain' o 'CC0'.
     Devuelve la URL de la imagen (thumb) o None si no encuentra nada adecuado.
     """
     base_url = "https://commons.wikimedia.org/w/api.php"
-
-    # Intento 1: buscar usando el texto completo del evento (recortado)
-    query = event["text"]
-    if len(query) > 120:
-        query = query[:120]
+    headers = {"User-Agent": USER_AGENT}
 
     def search_commons(q):
         params = {
@@ -281,7 +323,6 @@ def fetch_commons_image_url(event):
             "iiurlwidth": 1200,
             "iiextmetadata": 1,
         }
-        headers = {"User-Agent": USER_AGENT}
         r = requests.get(base_url, params=params, headers=headers, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -302,16 +343,37 @@ def fetch_commons_image_url(event):
                 candidates.append(url)
         return candidates
 
-    # Búsqueda principal
-    try:
-        candidates = search_commons(query)
-        if candidates:
-            print(f"✅ Encontradas {len(candidates)} imágenes PD/CC0 en Commons para: {query!r}")
-            return candidates[0]
-    except Exception as e:
-        print("⚠️ Error buscando imagen en Commons (query principal):", e)
+    text = event["text"]
 
-    # Intento 2: búsqueda más genérica si la anterior no da nada
+    # 1) Queries basadas en nombres propios
+    name_queries = extract_name_queries(text)
+    # 2) Query de respaldo con el texto del evento recortado
+    fallback_query = text
+    if len(fallback_query) > 120:
+        fallback_query = fallback_query[:120]
+
+    print("Posibles queries de nombres propios:", name_queries)
+
+    # Intentar primero con nombres propios y sus variantes
+    for q in name_queries:
+        try:
+            cands = search_commons(q)
+            if cands:
+                print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para query de nombre propio: {q!r}")
+                return cands[0]
+        except Exception as e:
+            print("⚠️ Error buscando imagen en Commons (nombre propio):", e)
+
+    # Intentar con el texto completo del evento (recortado)
+    try:
+        cands = search_commons(fallback_query)
+        if cands:
+            print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para query de texto: {fallback_query!r}")
+            return cands[0]
+    except Exception as e:
+        print("⚠️ Error buscando imagen en Commons (texto evento):", e)
+
+    # Intentos genéricos (mapas, tercios, etc.)
     generic_queries = [
         "Imperio español mapa",
         "Historia de España pintura",
@@ -319,10 +381,10 @@ def fetch_commons_image_url(event):
     ]
     for gq in generic_queries:
         try:
-            candidates = search_commons(gq)
-            if candidates:
-                print(f"✅ Encontradas {len(candidates)} imágenes PD/CC0 en Commons para búsqueda genérica: {gq!r}")
-                return candidates[0]
+            cands = search_commons(gq)
+            if cands:
+                print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para búsqueda genérica: {gq!r}")
+                return cands[0]
         except Exception as e:
             print("⚠️ Error buscando imagen en Commons (query genérica):", e)
 
