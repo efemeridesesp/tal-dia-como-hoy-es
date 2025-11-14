@@ -2,10 +2,10 @@ import os
 import requests
 import datetime
 import pytz
-import sys
 import time
 
 from openai import OpenAI
+import tweepy
 
 TZ = "Europe/Madrid"
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
@@ -20,13 +20,13 @@ TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
 TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
 TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
+TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
 
-# Cliente de OpenAI: cogerá OPENAI_API_KEY de la variable de entorno
 client = OpenAI()
 
 
@@ -140,7 +140,6 @@ def fetch_wikipedia_summary(title_or_url: str):
 
 
 def compose_post(ev, summary):
-    """Versión clásica sin OpenAI (fallback)."""
     anio = None
     if ev and ev.get("date"):
         try:
@@ -180,7 +179,6 @@ def compose_fallback_post(month: int, day: int):
 
 
 def generate_openai_tweet(ev, summary, month: int, day: int) -> str:
-    """Usa OpenAI para escribir el tweet final, con límite y hashtags."""
     anio = None
     if ev and ev.get("date"):
         try:
@@ -226,7 +224,6 @@ Instrucciones para el tweet:
 
     tweet = completion.choices[0].message.content.strip()
 
-    # Por si el modelo se pasa un poco, recortamos duro:
     if len(tweet) > 275:
         tweet = tweet[:272] + "…"
 
@@ -234,23 +231,26 @@ Instrucciones para el tweet:
 
 
 def post_to_twitter(text):
-    import tweepy
-
-    # DEBUG: ver si las claves están presentes (True/False)
     print(
         "DEBUG Twitter keys present:",
         bool(TW_API_KEY),
         bool(TW_API_SECRET),
         bool(TW_ACCESS_TOKEN),
         bool(TW_ACCESS_SECRET),
+        bool(TW_BEARER_TOKEN),
     )
 
-    auth = tweepy.OAuth1UserHandler(
-        TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
+    # Cliente v2: create_tweet (POST /2/tweets)
+    client_tw = tweepy.Client(
+        consumer_key=TW_API_KEY,
+        consumer_secret=TW_API_SECRET,
+        access_token=TW_ACCESS_TOKEN,
+        access_token_secret=TW_ACCESS_SECRET,
+        bearer_token=TW_BEARER_TOKEN,
     )
-    api = tweepy.API(auth)
-    api.verify_credentials()
-    api.update_status(status=text)
+
+    resp = client_tw.create_tweet(text=text)
+    print("DEBUG create_tweet response:", resp)
 
 
 def notify_telegram(msg):
@@ -283,7 +283,6 @@ def main():
         if not summary:
             summary = {"title": best["label"], "extract": "", "url": ""}
 
-        # Primero intentamos con OpenAI
         try:
             text = generate_openai_tweet(best, summary, month, day)
             print("✅ Tweet generado con OpenAI.")
