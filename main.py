@@ -13,47 +13,47 @@ TZ = "Europe/Madrid"
 # Hashtags fijos
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 
-# Núcleo duro: España como ACTOR
+# España / Imperio como ACTOR claro (muy valorado)
 SPANISH_ACTOR_TOKENS = [
-    "españa",
-    "español",
-    "española",
-    "españoles",
     "reyes católicos",
     "imperio español",
     "monarquía hispánica",
     "monarquía española",
-    "reino de castilla",
-    "reino de aragón",
-    "corona de castilla",
-    "corona de aragón",
-    "rey de españa",
-    "reina de españa",
-    "tercios",
     "armada española",
     "ejército español",
-]
-
-# “Español amplio”: cosas que suelen implicar España/Imperio
-SPANISH_WIDE_TOKENS = [
-    "castilla",
-    "aragón",
-    "granada",
-    "sevilla",
-    "toledo",
-    "madrid",
-    "virreinato",
+    "tercios",
+    "tercios españoles",
+    "tercios de flandes",
+    "virreinato de",
+    "virreinato del",
+    "virreinato de nueva españa",
+    "virreinato del perú",
+    "virreinato del río de la plata",
     "virrey",
-    "borbón",
-    "borbones",
-    "habsburgo",
-    "felipe ii",
-    "carlos v",
-    "carlos i de españa",
-    "carlos i de castilla",
+    "virreina",
+    "corona de castilla",
+    "corona de aragón",
 ]
 
-# Ciudades / teatro en territorio español (actor puede no ser España)
+# “Marca España” amplia (aquí queremos que entren muchas cosas)
+SPANISH_WIDE_TOKENS = [
+    "españa", "español", "española", "españoles",
+    "hispania", "hispano", "hispánica",
+    "reino de castilla", "reino de aragón",
+    "castilla", "aragón",
+    "granada", "sevilla", "toledo", "madrid",
+    "cartagena", "cartagena de indias",
+    "virreinato",
+    "borbón", "borbones",
+    "habsburgo",
+    "felipe ii", "felipe iii", "felipe iv",
+    "carlos v", "carlos i de españa",
+    "alfonso xii", "alfonso xiii", "isabel ii",
+    "partido comunista de españa",
+    "radio barcelona",
+]
+
+# Teatro en suelo español (puede ser guiris dándose de hostias en nuestra costa)
 SPANISH_THEATRE_TOKENS = [
     "málaga", "cádiz", "cartagena", "cartagena de indias",
     "barcelona", "valencia", "bilbao", "santander", "la coruña",
@@ -62,17 +62,28 @@ SPANISH_THEATRE_TOKENS = [
 
 # Palabras claramente militares
 MILITARY_KEYWORDS = [
-    "batalla", "Batalla", "guerra", "Guerra", "combate", "frente",
+    "batalla", "guerra", "combate", "frente",
     "asedio", "sitio", "conquista", "derrota", "victoria", "alzamiento",
     "revolución", "levantamiento", "sublevación", "bombardeo", "invasión",
-    "ejército", "Ejército", "toma", "capitulación", "ofensiva", "defensiva",
+    "ejército", "toma", "capitulación", "ofensiva", "defensiva",
 ]
 
 # Diplomacia / acuerdos / alianzas
 DIPLO_KEYWORDS = [
-    "tratado", "Tratado", "acuerdo", "Acuerdo",
-    "paz", "Paz", "alianza", "Alianza",
-    "capitulaciones", "Capitulaciones", "concordia", "Concordia",
+    "tratado", "acuerdo", "paz", "alianza",
+    "capitulaciones", "concordia",
+]
+
+# Nacionalidades extranjeras típicas (si solo salen estos y no España como actor, penalizamos)
+FOREIGN_TOKENS = [
+    "alemán", "alemana", "alemania", "nazi",
+    "británico", "británica", "inglés", "inglesa", "inglaterra",
+    "estadounidense", "americano", "americana", "ee.uu", "eeuu",
+    "francés", "francesa", "francia",
+    "italiano", "italiana", "italia",
+    "ruso", "rusa", "rusia",
+    "soviético", "soviética", "urss",
+    "japonés", "japonesa", "japón",
 ]
 
 # Cosas que penalizamos (cultura/pop blanda)
@@ -130,13 +141,13 @@ def fetch_hoyenlahistoria_events():
     soup = BeautifulSoup(resp.text, "html.parser")
     events = []
 
-    # Recorremos todos los <li> y nos quedamos con los que empiezan por un año
+    # Miramos todos los list items que empiezan con un año
     for li in soup.find_all("li"):
         text = " ".join(li.stripped_strings)
         if not text:
             continue
 
-        # Busca "AAAA ..." o "AAAA a.C. ..."
+        # Formato típico: "1501 el príncipe de Gales..."
         m = re.match(r"^(\d+)\s*(a\.C\.)?\s*(.*)", text)
         if not m:
             continue
@@ -147,9 +158,8 @@ def fetch_hoyenlahistoria_events():
         except ValueError:
             continue
 
-        # Si es a.C., lo dejamos como año negativo por si algún día lo quisieras usar
         if era:
-            year = -year
+            year = -year  # años a.C. negativos, por si algún día interesa
 
         body = rest.strip()
         if not body:
@@ -165,9 +175,9 @@ def fetch_hoyenlahistoria_events():
     return events
 
 
-# ----------------- Scoring “imperial” con Tiers ----------------- #
+# ----------------- Scoring “imperial” con penalización a batallas guiris ----------------- #
 
-def compute_flags_and_score(ev):
+def compute_score(ev):
     text = ev["text"]
     t_low = text.lower()
     year = ev["year"]
@@ -178,37 +188,46 @@ def compute_flags_and_score(ev):
     has_spanish_wide = any(tok in t_low for tok in SPANISH_WIDE_TOKENS)
     has_spanish_theatre = any(tok in t_low for tok in SPANISH_THEATRE_TOKENS)
 
-    has_military = any(kw.lower() in t_low for kw in MILITARY_KEYWORDS)
-    has_diplomatic = any(kw.lower() in t_low for kw in DIPLO_KEYWORDS)
+    has_military = any(kw in t_low for kw in MILITARY_KEYWORDS)
+    has_diplomatic = any(kw in t_low for kw in DIPLO_KEYWORDS)
+    has_foreign = any(tok in t_low for tok in FOREIGN_TOKENS)
 
-    # Núcleo: España como actor
+    # Núcleo: España/Imperio como actor → MUY arriba
     if has_spanish_actor:
-        score += 40
+        score += 35
 
-    # Español amplio (ciudades, reinos, virreinatos…)
+    # Marca España amplia (España, hispania, ciudades históricas, etc.)
     if has_spanish_wide:
-        score += 15
+        score += 18
 
-    # Teatro en España suma un poco (pero no decide solo)
+    # Teatro en España suma, pero menos
     if has_spanish_theatre:
-        score += 4
+        score += 5
 
-    # Militar suma bastante, pero por debajo de “España actor”
+    # Militar suma bastante (prioriza batallas)
     if has_military:
-        score += 10
+        score += 12
 
-    # Diplomático suma, pero menos que militar
+    # Diplomático (tratados, acuerdos, etc.) también suma
     if has_diplomatic:
-        score += 6
+        score += 8
 
-    # Penalizar fuertemente cultura/pop
+    # Penalizar fuerte cosas de premios/cultura pop
     for kw in CULTURE_LOW_PRIORITY:
-        if kw.lower() in t_low:
-            score -= 10
+        if kw in t_low:
+            score -= 12
 
-    # Bonus por siglos “interesantes” (aprox. XV–XIX)
+    # Bonus por siglos interesantes (1500–1899 aprox.)
     if 1400 <= year <= 1899:
         score += 5
+
+    # Penalización clave:
+    # Si es evento MILITAR, con actores claramente extranjeros,
+    # y España solo aparece de fondo (sin ser actor),
+    # lo hundimos en puntuación para que no gane a una efeméride española normal.
+    if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
+        # Este caso es EXACTAMENTE Ark Royal y similares
+        score -= 40
 
     ev["score"] = score
     ev["has_spanish_actor"] = has_spanish_actor
@@ -216,44 +235,21 @@ def compute_flags_and_score(ev):
     ev["has_spanish_theatre"] = has_spanish_theatre
     ev["has_military"] = has_military
     ev["has_diplomatic"] = has_diplomatic
+    ev["has_foreign"] = has_foreign
 
 
 def choose_best_event(events):
     """
-    Lógica de elección SIEMPRE devuelve algo si hay eventos.
-
-    Tiers por prioridad:
-      A) has_military AND has_spanish_actor
-      B) has_diplomatic AND has_spanish_actor
-      C) has_spanish_actor (aunque no sea militar/diplomático)
-      D) has_military AND has_spanish_theatre
-      E) resto (último recurso)
+    Elige el evento con mayor score según compute_score.
+    Siempre devuelve algo si hay eventos.
     """
     if not events:
         return None
 
     for ev in events:
-        compute_flags_and_score(ev)
+        compute_score(ev)
 
-    tierA = [e for e in events if e["has_military"] and e["has_spanish_actor"]]
-    tierB = [e for e in events if not e in tierA and e["has_diplomatic"] and e["has_spanish_actor"]]
-    tierC = [e for e in events if not e in tierA + tierB and e["has_spanish_actor"]]
-    tierD = [e for e in events if not e in tierA + tierB + tierC and e["has_military"] and e["has_spanish_theatre"]]
-    tierE = [e for e in events if e not in (tierA + tierB + tierC + tierD)]
-
-    if tierA:
-        candidates, tier_name = tierA, "Tier A (batalla/acción militar con España como actor)"
-    elif tierB:
-        candidates, tier_name = tierB, "Tier B (acuerdo/alianza con España como actor)"
-    elif tierC:
-        candidates, tier_name = tierC, "Tier C (evento claramente español/imperial)"
-    elif tierD:
-        candidates, tier_name = tierD, "Tier D (batalla en territorio español pero sin España como actor claro)"
-    else:
-        candidates, tier_name = tierE, "Tier E (evento general, último recurso)"
-
-    best = max(candidates, key=lambda e: e["score"])
-    print(f"➡️ Seleccionando de {tier_name}, total candidatos: {len(candidates)}")
+    best = max(events, key=lambda e: e["score"])
     return best
 
 
@@ -285,7 +281,7 @@ Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato:
 Reglas importantes:
 - Máximo 260 caracteres en total (incluyendo los hashtags).
 - Respeta el comienzo fijo: "{today_str}: En tal día como hoy del año {event_year},".
-- Tono divulgativo, con cierto orgullo por la historia de España/Imperio, sin emojis, sin URLs y sin mencionar la fuente.
+- Tono divulgativo, con cierto orgullo por la historia de España y su Imperio, sin emojis, sin URLs y sin mencionar la fuente.
 - No añadas más hashtags que estos cuatro ni cambies su texto: {hashtags}.
 - No uses saltos de línea, todo debe ir en una sola frase.
 """
@@ -366,7 +362,7 @@ def main():
         print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    # 2) Elegir el mejor evento según Tiers
+    # 2) Elegir el mejor evento según scoring
     best = choose_best_event(events)
     if not best:
         print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
@@ -381,7 +377,8 @@ def main():
         f"EspAmplio: {best.get('has_spanish_wide')}, "
         f"TeatroEsp: {best.get('has_spanish_theatre')}, "
         f"Militar: {best.get('has_military')}, "
-        f"Diplomático: {best.get('has_diplomatic')}"
+        f"Diplomático: {best.get('has_diplomatic')}, "
+        f"Extranjeros: {best.get('has_foreign')}"
     )
 
     # 3) Generar el texto del tuit con OpenAI
