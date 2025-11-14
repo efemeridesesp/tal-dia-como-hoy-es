@@ -223,7 +223,7 @@ def choose_best_event(events):
     return max(events, key=lambda e: e["score"])
 
 
-# ----------------- IMÁGENES: Commons (solo si matchea por nombre propio) ----------------- #
+# ----------------- IMÁGENES: Wikipedia (imagen principal de la página) ----------------- #
 
 def extract_name_queries(text):
     """
@@ -232,7 +232,7 @@ def extract_name_queries(text):
     - "Arturo Tudor"
     - "Reyes Católicos"
     etc.
-    Devuelve una lista de nombres (sin "retrato"/"pintura").
+    Devuelve una lista de nombres.
     """
     pattern = re.compile(
         r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+"
@@ -263,85 +263,71 @@ def extract_name_queries(text):
     return names
 
 
-def fetch_commons_image_url(event):
+def fetch_wikipedia_image_url(event):
     """
-    Busca una imagen en Wikimedia Commons SOLO si encuentra coincidencia clara
-    con nombres propios del evento.
-    - Extrae nombres propios (Catalina de Aragón, etc.).
-    - Para cada nombre genera queries ("nombre", "nombre retrato", "nombre pintura").
-    - Busca en Commons y sólo acepta archivos:
-        * con licencia Public Domain o CC0
-        * cuyo título contenga alguno de esos nombres (lowercase).
-    Si no encuentra nada, devuelve None y ese día se publica sin imagen.
+    Intenta obtener la imagen principal de Wikipedia en español
+    para alguno de los nombres propios detectados en el evento.
+    - Usa la API de es.wikipedia.org para buscar la página.
+    - Luego pide 'pageimages' para obtener la imagen principal.
+    Si no encuentra nada para ningún nombre, devuelve None.
     """
-    base_url = "https://commons.wikimedia.org/w/api.php"
     headers = {"User-Agent": USER_AGENT}
+    base_api = "https://es.wikipedia.org/w/api.php"
 
-    text = event["text"]
-    names = extract_name_queries(text)
+    names = extract_name_queries(event["text"])
     print("Nombres propios detectados en el evento:", names)
 
     if not names:
-        print("ℹ️ No se han detectado nombres propios claros; no se usará imagen.")
+        print("ℹ️ No se han detectado nombres propios claros; no se intentará imagen Wikipedia.")
         return None
 
-    allowed_substrings = [n.lower() for n in names]
-
-    def search_commons(q):
-        params = {
-            "action": "query",
-            "format": "json",
-            "prop": "imageinfo",
-            "generator": "search",
-            "gsrsearch": q,
-            "gsrlimit": 15,
-            "gsrnamespace": 6,
-            "iiprop": "url|extmetadata",
-            "iiurlwidth": 1200,
-            "iiextmetadata": 1,
-        }
-        r = requests.get(base_url, params=params, headers=headers, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        pages = data.get("query", {}).get("pages", {})
-        candidates = []
-        for _, page in pages.items():
-            title = page.get("title", "").lower()
-            if not any(sub in title for sub in allowed_substrings):
-                # Título no menciona ningún nombre propio → descartamos
-                continue
-            infos = page.get("imageinfo", [])
-            if not infos:
-                continue
-            ii = infos[0]
-            url = ii.get("thumburl") or ii.get("url")
-            if not url:
-                continue
-            extmeta = ii.get("extmetadata", {})
-            lic = extmeta.get("LicenseShortName", {}).get("value", "").lower()
-            if "public domain" in lic or "cc0" in lic:
-                candidates.append(url)
-        return candidates
-
-    # Construir queries a partir de nombres
-    queries = []
-    for n in names:
-        queries.append(n)
-        queries.append(f"{n} retrato")
-        queries.append(f"{n} pintura")
-
-    print("Queries que se probarán en Commons:", queries)
-
-    for q in queries:
+    for name in names:
         try:
-            cands = search_commons(q)
-            if cands:
-                print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para query: {q!r}")
-                return cands[0]
-        except Exception as e:
-            print("⚠️ Error buscando imagen en Commons (query nombre):", e)
+            # 1) Buscar página en Wikipedia para ese nombre
+            params_search = {
+                "action": "query",
+                "format": "json",
+                "list": "search",
+                "srsearch": name,
+                "srlimit": 1,
+            }
+            r = requests.get(base_api, params=params_search, headers=headers, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("query", {}).get("search", [])
+            if not results:
+                continue
 
-    print("ℹ️ No se ha encontrado imagen adecuadamente asociada a los nombres propios; se publicará sin imagen.")
+            page_title = results[0].get("title")
+            if not page_title:
+                continue
+
+            print(f"Intentando obtener imagen principal de Wikipedia para página: {page_title!r}")
+
+            # 2) Pedir la imagen principal de esa página
+            params_pageimg = {
+                "action": "query",
+                "format": "json",
+                "prop": "pageimages",
+                "piprop": "original|thumbnail",
+                "pithumbsize": 1200,
+                "titles": page_title,
+            }
+            r2 = requests.get(base_api, params=params_pageimg, headers=headers, timeout=15)
+            r2.raise_for_status()
+            data2 = r2.json()
+            pages = data2.get("query", {}).get("pages", {})
+            for _, page in pages.items():
+                original = page.get("original", {})
+                thumbnail = page.get("thumbnail", {})
+                img_url = original.get("source") or thumbnail.get("source")
+                if img_url:
+                    print(f"✅ Imagen principal encontrada en Wikipedia para {page_title!r}: {img_url}")
+                    return img_url
+        except Exception as e:
+            print(f"⚠️ Error consultando Wikipedia para nombre {name!r}:", e)
+
+    print("ℹ️ No se ha encontrado imagen principal adecuada en Wikipedia.")
     return None
 
 
@@ -528,7 +514,7 @@ def post_thread(headline, followups, event):
 
     media_ids = None
     try:
-        img_url = fetch_commons_image_url(event)
+        img_url = fetch_wikipedia_image_url(event)
         if img_url:
             img_path = download_image(img_url)
             media = api_v1.media_upload(img_path)
