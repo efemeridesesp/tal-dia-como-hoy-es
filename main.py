@@ -5,6 +5,7 @@ import pytz
 import re
 from bs4 import BeautifulSoup
 from openai import OpenAI
+import tweepy
 
 # Zona horaria de referencia
 TZ = "Europe/Madrid"
@@ -16,7 +17,7 @@ DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemé
 KEYWORDS_PRIORITY = [
     "Imperio español", "Reyes Católicos", "Armada", "Flota", "Galeón",
     "América", "Virreinato", "Nueva España", "Filipinas", "Pacífico",
-    "batalla", "victoria", "derrota", "guerra", "naval",
+    "batalla", "victoria", "derrota", "guerra", "Guerra", "naval",
     "Carlos V", "Felipe II", "Felipe III", "Felipe IV",
     "Granada", "Castilla", "Aragón", "Toledo", "Sevilla", "Madrid",
     "España", "español", "española"
@@ -27,12 +28,12 @@ TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
 TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
 TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
+TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
 
-# Cliente de OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Cliente de OpenAI (toma OPENAI_API_KEY del entorno)
+client = OpenAI()
 
 
 # ----------------- Utilidades de fecha ----------------- #
@@ -162,9 +163,6 @@ def generate_openai_tweet(today_year, today_month_name, today_day, event):
 
     '14 de noviembre de 2025: En tal día como hoy del año XXXX, ... #TalDiaComoHoy #España #HistoriaDeEspaña #Efemérides'
     """
-    if not OPENAI_API_KEY:
-        raise RuntimeError("Falta OPENAI_API_KEY en las variables de entorno.")
-
     today_str = f"{today_day} de {today_month_name} de {today_year}"
     event_year = event["year"]
     event_text = event["text"]
@@ -191,7 +189,7 @@ Reglas importantes:
 """
 
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4.1-mini",
         messages=[
             {
                 "role": "system",
@@ -215,23 +213,35 @@ Reglas importantes:
     return text
 
 
-# ----------------- Publicación en X (Twitter) ----------------- #
+# ----------------- Publicación en X (API v2) ----------------- #
 
 def post_to_twitter(text):
-    """Publica el tuit usando Tweepy y OAuth1.0a (v1.1)."""
-    import tweepy
+    """Publica el tuit usando la X API v2 (create_tweet)."""
+    if not text:
+        raise RuntimeError("Texto vacío, no se puede publicar.")
 
-    if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET):
+    if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
         raise RuntimeError("Faltan claves de Twitter/X en las variables de entorno.")
 
-    auth = tweepy.OAuth1UserHandler(
-        TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
+    print(
+        "DEBUG Twitter keys present:",
+        bool(TW_API_KEY),
+        bool(TW_API_SECRET),
+        bool(TW_ACCESS_TOKEN),
+        bool(TW_ACCESS_SECRET),
+        bool(TW_BEARER_TOKEN),
     )
-    api = tweepy.API(auth)
 
-    # Esto falla con 401 si algo está mal, lo cual nos viene bien para depurar
-    api.verify_credentials()
-    api.update_status(status=text)
+    client_tw = tweepy.Client(
+        consumer_key=TW_API_KEY,
+        consumer_secret=TW_API_SECRET,
+        access_token=TW_ACCESS_TOKEN,
+        access_token_secret=TW_ACCESS_SECRET,
+        bearer_token=TW_BEARER_TOKEN,
+    )
+
+    resp = client_tw.create_tweet(text=text)
+    print("DEBUG create_tweet response:", resp)
 
 
 # ----------------- Main ----------------- #
@@ -276,7 +286,7 @@ def main():
     print(tweet_text)
     print(f"Largo: {len(tweet_text)} caracteres")
 
-    # 4) Publicar en X
+    # 4) Publicar en X (API v2)
     try:
         post_to_twitter(tweet_text)
         print("✅ Tuit publicado correctamente.")
