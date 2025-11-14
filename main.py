@@ -3,6 +3,7 @@ import requests
 import datetime
 import pytz
 import re
+import json
 from bs4 import BeautifulSoup
 from openai import OpenAI
 import tweepy
@@ -10,7 +11,7 @@ import tweepy
 # Zona horaria de referencia
 TZ = "Europe/Madrid"
 
-# Hashtags fijos
+# Hashtags fijos SOLO para el tuit titular
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 
 # España / Imperio como ACTOR claro (muy valorado)
@@ -74,7 +75,7 @@ DIPLO_KEYWORDS = [
     "capitulaciones", "concordia",
 ]
 
-# Nacionalidades extranjeras típicas (si solo salen estos y no España como actor, penalizamos)
+# Nacionalidades extranjeras típicas
 FOREIGN_TOKENS = [
     "alemán", "alemana", "alemania", "nazi",
     "británico", "británica", "inglés", "inglesa", "inglaterra",
@@ -224,9 +225,8 @@ def compute_score(ev):
     # Penalización clave:
     # Si es evento MILITAR, con actores claramente extranjeros,
     # y España solo aparece de fondo (sin ser actor),
-    # lo hundimos en puntuación para que no gane a una efeméride española normal.
+    # lo hundimos para que no gane a una efeméride española normal.
     if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
-        # Este caso es EXACTAMENTE Ark Royal y similares
         score -= 40
 
     ev["score"] = score
@@ -253,18 +253,17 @@ def choose_best_event(events):
     return best
 
 
-# ----------------- Generación de texto con OpenAI ----------------- #
+# ----------------- Generación de TEXTO con OpenAI ----------------- #
 
-def generate_openai_tweet(today_year, today_month_name, today_day, event):
+def generate_headline_tweet(today_year, today_month_name, today_day, event):
     """
-    Pide a OpenAI que redacte el tuit con el formato:
-
-    '14 de noviembre de 2025: En tal día como hoy del año XXXX, ... #TalDiaComoHoy #España #HistoriaDeEspaña #Efemérides'
+    Genera el tuit TITULAR (con banderita, fecha, año del suceso y hashtags).
+    Formato:
+    '🇪🇸 14 de noviembre de 2025: En tal día como hoy del año XXXX, ... #TalDiaComoHoy #España #HistoriaDeEspaña #Efemérides'
     """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
     event_year = event["year"]
     event_text = event["text"]
-
     hashtags = " ".join(DEFAULT_HASHTAGS)
 
     prompt_user = f"""
@@ -274,14 +273,15 @@ Efeméride seleccionada (año {event_year}) procedente de un listado de efeméri
 \"\"\"{event_text}\"\"\"
 
 
-Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato:
+Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato general:
 
-\"{today_str}: En tal día como hoy del año {event_year}, ... {hashtags}\"
+"🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ... {hashtags}"
 
 Reglas importantes:
-- Máximo 260 caracteres en total (incluyendo los hashtags).
-- Respeta el comienzo fijo: "{today_str}: En tal día como hoy del año {event_year},".
-- Tono divulgativo, con cierto orgullo por la historia de España y su Imperio, sin emojis, sin URLs y sin mencionar la fuente.
+- Máximo 260 caracteres en total (incluyendo los hashtags y la banderita).
+- Debe empezar EXACTAMENTE por: "🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
+  y a continuación una frase breve que resuma el hecho histórico.
+- Tono divulgativo, con cierto orgullo por la historia de España y su Imperio, sin más emojis, sin URLs y sin mencionar la fuente.
 - No añadas más hashtags que estos cuatro ni cambies su texto: {hashtags}.
 - No uses saltos de línea, todo debe ir en una sola frase.
 """
@@ -298,26 +298,122 @@ Reglas importantes:
             },
             {"role": "user", "content": prompt_user},
         ],
-        temperature=0.5,
-        max_tokens=180,
+        temperature=0.4,
+        max_tokens=200,
     )
 
     text = completion.choices[0].message.content.strip()
 
-    # Por seguridad recortamos a 275 caracteres máximo
+    # Recorte de seguridad
     if len(text) > 275:
         text = text[:272].rstrip() + "..."
+
+    # Seguridad extra: si por lo que sea no empieza como debe, lo forzamos mínimamente
+    prefix = f"🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
+    if not text.startswith(prefix):
+        # Extraemos solo la parte descriptiva
+        core_desc = event_text
+        if len(core_desc) > 150:
+            core_desc = core_desc[:147].rstrip() + "..."
+        text = f"{prefix} {core_desc} {hashtags}"
+        if len(text) > 275:
+            text = text[:272].rstrip() + "..."
 
     return text
 
 
+def generate_followup_tweets(today_year, today_month_name, today_day, event):
+    """
+    Genera entre 1 y 5 tuits adicionales que irán como respuestas (hilo).
+    - Sin fecha ni fórmula 'En tal día como hoy...'
+    - Sin hashtags.
+    - Sin emojis.
+    - Explican por qué ese hecho/f
+
+ue importante para España/Imperio, consecuencias, etc.
+    Devuelve una lista de strings.
+    """
+    today_str = f"{today_day} de {today_month_name} de {today_year}"
+    event_year = event["year"]
+    event_text = event["text"]
+
+    prompt_user = f"""
+Fecha de hoy: {today_str}.
+Efeméride seleccionada (año {event_year}):
+
+\"\"\"{event_text}\"\"\"
+
+
+Vas a escribir un HILO que continúa el tuit titular (que ya dice:
+"🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ...").
+
+Tu tarea:
+- Redacta entre 1 y 5 tuits adicionales (no el titular) que expliquen:
+  - qué supuso este hecho para España o para el Imperio español,
+  - o por qué la figura implicada fue importante para España/Imperio,
+  - consecuencias a corto y largo plazo,
+  - contexto histórico relevante (sin irte del tema).
+- Cada tuit debe:
+  - estar en español,
+  - tener como máximo 260 caracteres,
+  - NO empezar por la fecha ni por "En tal día como hoy...",
+  - NO incluir hashtags,
+  - NO incluir emojis,
+  - ser autosuficiente pero encajar como parte de una pequeña historia enlazada.
+
+FORMATO DE RESPUESTA:
+- Devuélveme EXCLUSIVAMENTE un JSON con una lista de strings, por ejemplo:
+  ["texto del tuit 2", "texto del tuit 3", "..."]
+- No añadas nada fuera del JSON.
+"""
+
+    completion = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Eres un divulgador de historia de España y del Imperio español. "
+                    "Escribes hilos de X breves, claros y ordenados, respetando estrictamente el formato pedido."
+                ),
+            },
+            {"role": "user", "content": prompt_user},
+        ],
+        temperature=0.6,
+        max_tokens=400,
+    )
+
+    raw = completion.choices[0].message.content.strip()
+
+    tweets = []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if not text:
+                        continue
+                    # Recorte de seguridad
+                    if len(text) > 275:
+                        text = text[:272].rstrip() + "..."
+                    tweets.append(text)
+    except Exception as e:
+        print("⚠️ No se ha podido parsear el JSON de followups:", e)
+        print("Contenido bruto devuelto por OpenAI:")
+        print(raw)
+        tweets = []
+
+    # Garantizar entre 1 y 5 si hay algo; si no hay nada, devolvemos lista vacía
+    if len(tweets) > 5:
+        tweets = tweets[:5]
+
+    return tweets
+
+
 # ----------------- Publicación en X (API v2) ----------------- #
 
-def post_to_twitter(text):
-    """Publica el tuit usando la X API v2 (create_tweet)."""
-    if not text:
-        raise RuntimeError("Texto vacío, no se puede publicar.")
-
+def get_twitter_client():
     if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
         raise RuntimeError("Faltan claves de Twitter/X en las variables de entorno.")
 
@@ -337,9 +433,35 @@ def post_to_twitter(text):
         access_token_secret=TW_ACCESS_SECRET,
         bearer_token=TW_BEARER_TOKEN,
     )
+    return client_tw
 
-    resp = client_tw.create_tweet(text=text)
-    print("DEBUG create_tweet response:", resp)
+
+def post_thread(headline, followups):
+    """
+    Publica el tuit titular y, si hay followups, va respondiendo en hilo.
+    """
+    client_tw = get_twitter_client()
+
+    # Publicar titular
+    resp = client_tw.create_tweet(text=headline)
+    print("DEBUG create_tweet (headline) response:", resp)
+    tweet_id = resp.data.get("id")
+    if not tweet_id:
+        print("⚠️ No se obtuvo ID del tuit titular, no se puede continuar el hilo.")
+        return
+
+    # Publicar respuestas encadenadas
+    parent_id = tweet_id
+    for t in followups:
+        try:
+            resp = client_tw.create_tweet(text=t, in_reply_to_tweet_id=parent_id)
+            print("DEBUG create_tweet (reply) response:", resp)
+            new_id = resp.data.get("id")
+            if new_id:
+                parent_id = new_id
+        except Exception as e:
+            print("❌ Error publicando un tuit de hilo:", e)
+            break
 
 
 # ----------------- Main ----------------- #
@@ -381,23 +503,34 @@ def main():
         f"Extranjeros: {best.get('has_foreign')}"
     )
 
-    # 3) Generar el texto del tuit con OpenAI
+    # 3) Generar el tuit titular
     try:
-        tweet_text = generate_openai_tweet(today_year, today_month_name, today_day, best)
+        headline = generate_headline_tweet(today_year, today_month_name, today_day, best)
     except Exception as e:
-        print("❌ Error al generar el tuit con OpenAI:", e)
-        raise
+        print("❌ Error al generar el tuit titular con OpenAI:", e)
+        return
 
-    print("Tuit generado:")
-    print(tweet_text)
-    print(f"Largo: {len(tweet_text)} caracteres")
+    print("Tuit titular generado:")
+    print(headline)
+    print(f"Largo: {len(headline)} caracteres")
 
-    # 4) Publicar en X (API v2)
+    # 4) Generar los tuits de hilo (2º a 6º)
     try:
-        post_to_twitter(tweet_text)
-        print("✅ Tuit publicado correctamente.")
+        followups = generate_followup_tweets(today_year, today_month_name, today_day, best)
     except Exception as e:
-        print("❌ Error publicando en Twitter/X:", e)
+        print("⚠️ Error generando los tuits de hilo con OpenAI:", e)
+        followups = []
+
+    print(f"Se han generado {len(followups)} tuits adicionales para el hilo.")
+    for i, t in enumerate(followups, start=2):
+        print(f"[Tuit {i}] {t} (len={len(t)})")
+
+    # 5) Publicar hilo en X
+    try:
+        post_thread(headline, followups)
+        print("✅ Hilo publicado correctamente.")
+    except Exception as e:
+        print("❌ Error publicando el hilo en Twitter/X:", e)
         raise
 
 
