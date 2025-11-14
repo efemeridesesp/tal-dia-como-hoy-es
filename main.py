@@ -37,6 +37,24 @@ CULTURE_LOW_PRIORITY = [
     "discográfica", "disco", "álbum", "single"
 ]
 
+# Núcleo de “marca España / Imperio” que EXIGIMOS para publicar
+CORE_SPANISH_TOKENS = [
+    "españa",
+    "español",
+    "española",
+    "reyes católicos",
+    "monarquía hispánica",
+    "imperio español",
+    "monarquía española",
+    "reino de castilla",
+    "reino de aragón",
+    "corona de castilla",
+    "corona de aragón",
+    "rey de españa",
+    "reina de españa",
+    "tercios",
+]
+
 # Claves de X (Twitter) desde los secrets del repositorio
 TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
@@ -136,15 +154,12 @@ def compute_scores(events):
 
         score = 0.0
 
-        # ¿Tiene algo claramente español?
-        # (solo contamos palabras fuertes, no ciudades sueltas)
-        has_spanish = any(w in t_low for w in ["españa", "español", "española", "reyes católicos",
-                                               "monarquía hispánica", "reino de castilla", "reino de aragón"])
-
+        # ¿Tiene algo claramente español/imperial?
+        has_spanish = any(tok in t_low for tok in CORE_SPANISH_TOKENS)
         if has_spanish:
-            score += 6
+            score += 8
 
-        # ¿Tiene keywords imperiales/políticas gordas?
+        # ¿Tiene keywords imperiales/políticas gordas (más suaves)?
         has_imperial = False
         for kw in BASE_KEYWORDS:
             if kw.lower() in t_low:
@@ -178,9 +193,8 @@ def compute_scores(events):
 def choose_best_event(events):
     """
     Nueva lógica:
-      - Solo consideramos eventos con componente español/imperial:
-          has_spanish o has_imperial True
-      - Dentro de esos, priorizamos los militares (has_military True).
+      - Solo consideramos eventos cuyo texto incluya ALGUNA de las CORE_SPANISH_TOKENS.
+      - Dentro de esos, priorizamos los militares.
       - Si aun así no hay NINGUNO → devolvemos None y NO se publica.
     """
     if not events:
@@ -188,22 +202,22 @@ def choose_best_event(events):
 
     compute_scores(events)
 
-    # Eventos “relevantes para España/Imperio”
-    spanish_related = [e for e in events if e["has_spanish"] or e["has_imperial"]]
+    # Filtramos SOLO eventos con núcleo español explícito
+    core_spanish_events = [e for e in events if e["has_spanish"]]
 
-    if not spanish_related:
-        print("⚠️ No hay eventos claramente españoles/imperiales hoy. No se publicará nada.")
+    if not core_spanish_events:
+        print("⚠️ No hay eventos con núcleo español/imperial explícito hoy. No se publicará nada.")
         return None
 
-    # De esos, priorizamos los que además son militares
-    military_spanish = [e for e in spanish_related if e["has_military"]]
+    # Dentro de esos, priorizamos militares si los hay
+    military_core = [e for e in core_spanish_events if e["has_military"]]
 
-    if military_spanish:
-        candidates = military_spanish
-        tier_name = "Eventos españoles/imperiales con componente militar"
+    if military_core:
+        candidates = military_core
+        tier_name = "Eventos núcleo español/imperial con componente militar"
     else:
-        candidates = spanish_related
-        tier_name = "Eventos españoles/imperiales (sin requisito militar)"
+        candidates = core_spanish_events
+        tier_name = "Eventos núcleo español/imperial (sin requisito militar)"
 
     best = max(candidates, key=lambda e: e["score"])
     print(f"➡️ Seleccionando de {tier_name}, total candidatos: {len(candidates)}")
@@ -319,7 +333,7 @@ def main():
         print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    # 2) Elegir el mejor evento según lógica “solo español/imperial”
+    # 2) Elegir el mejor evento según lógica “núcleo español obligatorio”
     best = choose_best_event(events)
     if not best:
         print("No se ha encontrado ningún evento suficientemente español/imperial. No se publicará tuit.")
@@ -329,7 +343,7 @@ def main():
     print(f"- Año: {best['year']}")
     print(f"- Texto: {best['text']}")
     print(f"- Score: {best.get('score', 'N/A')}")
-    print(f"- Militar: {best.get('has_military')}, Imperial: {best.get('has_imperial')}, Español: {best.get('has_spanish')}")
+    print(f"- Militar: {best.get('has_military')}, Imperial: {best.get('has_imperial')}, Español(core): {best.get('has_spanish')}")
 
     # 3) Generar el texto del tuit con OpenAI
     try:
