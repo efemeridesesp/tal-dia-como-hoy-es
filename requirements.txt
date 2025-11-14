@@ -1,4 +1,5 @@
 requests
 pytz
-tweepy>=4.14.0
+tweepy
+beautifulsoup4
 openai>=1.0.0
