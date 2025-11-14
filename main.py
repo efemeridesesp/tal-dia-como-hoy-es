@@ -14,13 +14,27 @@ TZ = "Europe/Madrid"
 DEFAULT_HASHTAGS = ["#TalDiaComoHoy", "#España", "#HistoriaDeEspaña", "#Efemérides"]
 
 # Palabras clave para priorizar eventos "imperiales/españoles"
-KEYWORDS_PRIORITY = [
+BASE_KEYWORDS = [
     "Imperio español", "Reyes Católicos", "Armada", "Flota", "Galeón",
     "América", "Virreinato", "Nueva España", "Filipinas", "Pacífico",
-    "batalla", "victoria", "derrota", "guerra", "Guerra", "naval",
-    "Carlos V", "Felipe II", "Felipe III", "Felipe IV",
     "Granada", "Castilla", "Aragón", "Toledo", "Sevilla", "Madrid",
-    "España", "español", "española"
+    "Carlos V", "Felipe II", "Felipe III", "Felipe IV", "Monarquía Hispánica",
+    "Tercios", "España", "español", "española"
+]
+
+MILITARY_KEYWORDS = [
+    "batalla", "Batalla", "guerra", "Guerra", "combate", "frente",
+    "asedio", "sitio", "conquista", "derrota", "victoria", "alzamiento",
+    "revolución", "levantamiento", "sublevación", "bombardeo", "invasión",
+    "ejército", "Armada", "flota", "toma", "capitulación"
+]
+
+# Palabras que queremos penalizar (cosas poco épicas)
+CULTURE_LOW_PRIORITY = [
+    "premio", "premios", "concurso", "festival", "certamen",
+    "programa de radio", "programa de televisión", "radio", "televisión",
+    "serie", "película", "cine", "novela", "poeta", "cantante", "músico",
+    "discográfica", "disco", "álbum", "single"
 ]
 
 # Claves de X (Twitter) desde los secrets del repositorio
@@ -105,53 +119,92 @@ def fetch_hoyenlahistoria_events():
     return events
 
 
-def score_event(ev):
+# ----------------- Scoring “imperial” ----------------- #
+
+def compute_scores(events):
     """
-    Da una puntuación a cada evento según palabras clave y época histórica.
-    Cuanto más "España / Imperio", más puntos.
+    Calcula varias métricas y devuelve la lista de eventos enriquecida con:
+      - score
+      - has_military
+      - has_imperial
+      - has_spanish
     """
-    text = ev["text"]
-    year = ev["year"]
-    t_low = text.lower()
+    for ev in events:
+        text = ev["text"]
+        t_low = text.lower()
+        year = ev["year"]
 
-    score = 0
+        score = 0.0
 
-    # Puntos por menciones explícitas a España
-    if "españa" in t_low or "español" in t_low or "española" in t_low:
-        score += 5
+        # ¿Tiene algo claramente español?
+        has_spanish = any(w in t_low for w in ["españa", "español", "española", "castilla", "aragón"])
+        if has_spanish:
+            score += 5
 
-    # Palabras clave de prioridad
-    for i, kw in enumerate(KEYWORDS_PRIORITY[::-1], start=1):
-        if kw.lower() in t_low:
-            score += i
+        # ¿Tiene keywords imperiales/políticas gordas?
+        has_imperial = False
+        for kw in BASE_KEYWORDS:
+            if kw.lower() in t_low:
+                score += 3
+                has_imperial = True
 
-    # Bonus por siglos "interesantes" (aprox. XV–XIX)
-    if 1400 <= year <= 1899:
-        score += 3
+        # ¿Tiene keywords directamente militares?
+        has_military = False
+        for kw in MILITARY_KEYWORDS:
+            if kw.lower() in t_low:
+                score += 8
+                has_military = True
 
-    return score
+        # Penalizar fuertemente eventos “de premios/concurso/programa/etc.”
+        for kw in CULTURE_LOW_PRIORITY:
+            if kw.lower() in t_low:
+                score -= 6
+
+        # Bonus por siglos “interesantes” (aprox. XV–XIX)
+        if 1400 <= year <= 1899:
+            score += 2
+
+        ev["score"] = score
+        ev["has_military"] = has_military
+        ev["has_imperial"] = has_imperial
+        ev["has_spanish"] = has_spanish
+
+    return events
 
 
 def choose_best_event(events):
     """
-    Elige el mejor evento, priorizando los que tengan score > 0.
-    Si todos son 0, elige el que más score tenga igualmente.
+    Elige el mejor evento con una lógica por capas:
+      1) Eventos con componente militar/imperial fuerte.
+      2) Si no hay, eventos claramente españoles/imperiales.
+      3) Si no hay nada de lo anterior, el mejor evento general.
     """
     if not events:
         return None
 
-    # Calculamos score de todos
-    for ev in events:
-        ev["score"] = score_event(ev)
+    compute_scores(events)
 
-    spanish_like = [e for e in events if e["score"] > 0]
+    # Tier 1: militares o imperiales + españoles
+    tier1 = [e for e in events if (e["has_military"] or e["has_imperial"]) and e["has_spanish"]]
 
-    if spanish_like:
-        candidates = spanish_like
+    # Tier 2: algo español o imperial, aunque no militar
+    tier2 = [e for e in events if e["has_spanish"] or e["has_imperial"]]
+
+    # Tier 3: lo que haya
+    tier3 = events
+
+    if tier1:
+        candidates = tier1
+        tier_name = "Tier 1 (militar/imperial + español)"
+    elif tier2:
+        candidates = tier2
+        tier_name = "Tier 2 (español/imperial sin componente militar fuerte)"
     else:
-        candidates = events  # si un día raro no hay nada español, usamos algo general
+        candidates = tier3
+        tier_name = "Tier 3 (general)"
 
     best = max(candidates, key=lambda e: e["score"])
+    print(f"➡️ Seleccionando de {tier_name}, total candidatos: {len(candidates)}")
     return best
 
 
@@ -264,7 +317,7 @@ def main():
         print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    # 2) Elegir el mejor evento
+    # 2) Elegir el mejor evento según scoring “imperial”
     best = choose_best_event(events)
     if not best:
         print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
@@ -274,6 +327,7 @@ def main():
     print(f"- Año: {best['year']}")
     print(f"- Texto: {best['text']}")
     print(f"- Score: {best.get('score', 'N/A')}")
+    print(f"- Militar: {best.get('has_military')}, Imperial: {best.get('has_imperial')}, Español: {best.get('has_spanish')}")
 
     # 3) Generar el texto del tuit con OpenAI
     try:
