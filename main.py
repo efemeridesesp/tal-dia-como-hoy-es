@@ -19,7 +19,7 @@ BASE_KEYWORDS = [
     "América", "Virreinato", "Nueva España", "Filipinas", "Pacífico",
     "Granada", "Castilla", "Aragón", "Toledo", "Sevilla", "Madrid",
     "Carlos V", "Felipe II", "Felipe III", "Felipe IV", "Monarquía Hispánica",
-    "Tercios", "España", "español", "española"
+    "Tercios", "Virreinato", "Virrey", "Corte de Madrid"
 ]
 
 MILITARY_KEYWORDS = [
@@ -137,9 +137,12 @@ def compute_scores(events):
         score = 0.0
 
         # ¿Tiene algo claramente español?
-        has_spanish = any(w in t_low for w in ["españa", "español", "española", "castilla", "aragón"])
+        # (solo contamos palabras fuertes, no ciudades sueltas)
+        has_spanish = any(w in t_low for w in ["españa", "español", "española", "reyes católicos",
+                                               "monarquía hispánica", "reino de castilla", "reino de aragón"])
+
         if has_spanish:
-            score += 5
+            score += 6
 
         # ¿Tiene keywords imperiales/políticas gordas?
         has_imperial = False
@@ -158,7 +161,7 @@ def compute_scores(events):
         # Penalizar fuertemente eventos “de premios/concurso/programa/etc.”
         for kw in CULTURE_LOW_PRIORITY:
             if kw.lower() in t_low:
-                score -= 6
+                score -= 8
 
         # Bonus por siglos “interesantes” (aprox. XV–XIX)
         if 1400 <= year <= 1899:
@@ -174,34 +177,33 @@ def compute_scores(events):
 
 def choose_best_event(events):
     """
-    Elige el mejor evento con una lógica por capas:
-      1) Eventos con componente militar/imperial fuerte.
-      2) Si no hay, eventos claramente españoles/imperiales.
-      3) Si no hay nada de lo anterior, el mejor evento general.
+    Nueva lógica:
+      - Solo consideramos eventos con componente español/imperial:
+          has_spanish o has_imperial True
+      - Dentro de esos, priorizamos los militares (has_military True).
+      - Si aun así no hay NINGUNO → devolvemos None y NO se publica.
     """
     if not events:
         return None
 
     compute_scores(events)
 
-    # Tier 1: militares o imperiales + españoles
-    tier1 = [e for e in events if (e["has_military"] or e["has_imperial"]) and e["has_spanish"]]
+    # Eventos “relevantes para España/Imperio”
+    spanish_related = [e for e in events if e["has_spanish"] or e["has_imperial"]]
 
-    # Tier 2: algo español o imperial, aunque no militar
-    tier2 = [e for e in events if e["has_spanish"] or e["has_imperial"]]
+    if not spanish_related:
+        print("⚠️ No hay eventos claramente españoles/imperiales hoy. No se publicará nada.")
+        return None
 
-    # Tier 3: lo que haya
-    tier3 = events
+    # De esos, priorizamos los que además son militares
+    military_spanish = [e for e in spanish_related if e["has_military"]]
 
-    if tier1:
-        candidates = tier1
-        tier_name = "Tier 1 (militar/imperial + español)"
-    elif tier2:
-        candidates = tier2
-        tier_name = "Tier 2 (español/imperial sin componente militar fuerte)"
+    if military_spanish:
+        candidates = military_spanish
+        tier_name = "Eventos españoles/imperiales con componente militar"
     else:
-        candidates = tier3
-        tier_name = "Tier 3 (general)"
+        candidates = spanish_related
+        tier_name = "Eventos españoles/imperiales (sin requisito militar)"
 
     best = max(candidates, key=lambda e: e["score"])
     print(f"➡️ Seleccionando de {tier_name}, total candidatos: {len(candidates)}")
@@ -317,10 +319,10 @@ def main():
         print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    # 2) Elegir el mejor evento según scoring “imperial”
+    # 2) Elegir el mejor evento según lógica “solo español/imperial”
     best = choose_best_event(events)
     if not best:
-        print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
+        print("No se ha encontrado ningún evento suficientemente español/imperial. No se publicará tuit.")
         return
 
     print("Evento elegido:")
