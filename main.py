@@ -36,7 +36,7 @@ SPANISH_ACTOR_TOKENS = [
     "corona de aragón",
 ]
 
-# “Marca España” amplia (aquí queremos que entren muchas cosas)
+# “Marca España” amplia
 SPANISH_WIDE_TOKENS = [
     "españa", "español", "española", "españoles",
     "hispania", "hispano", "hispánica",
@@ -54,14 +54,14 @@ SPANISH_WIDE_TOKENS = [
     "radio barcelona",
 ]
 
-# Teatro en suelo español (puede ser guiris dándose de hostias en nuestra costa)
+# Teatro en territorio español
 SPANISH_THEATRE_TOKENS = [
     "málaga", "cádiz", "cartagena", "cartagena de indias",
     "barcelona", "valencia", "bilbao", "santander", "la coruña",
     "ceuta", "melilla", "baleares", "canarias",
 ]
 
-# Palabras claramente militares
+# Palabras militares
 MILITARY_KEYWORDS = [
     "batalla", "guerra", "combate", "frente",
     "asedio", "sitio", "conquista", "derrota", "victoria", "alzamiento",
@@ -69,13 +69,13 @@ MILITARY_KEYWORDS = [
     "ejército", "toma", "capitulación", "ofensiva", "defensiva",
 ]
 
-# Diplomacia / acuerdos / alianzas
+# Diplomacia / acuerdos
 DIPLO_KEYWORDS = [
     "tratado", "acuerdo", "paz", "alianza",
     "capitulaciones", "concordia",
 ]
 
-# Nacionalidades extranjeras típicas
+# Nacionalidades extranjeras
 FOREIGN_TOKENS = [
     "alemán", "alemana", "alemania", "nazi",
     "británico", "británica", "inglés", "inglesa", "inglaterra",
@@ -87,7 +87,7 @@ FOREIGN_TOKENS = [
     "japonés", "japonesa", "japón",
 ]
 
-# Cosas que penalizamos (cultura/pop blanda)
+# Cosas de cultura/pop que penalizamos
 CULTURE_LOW_PRIORITY = [
     "premio", "premios", "concurso", "festival", "certamen",
     "programa de radio", "programa de televisión", "radio", "televisión",
@@ -95,7 +95,7 @@ CULTURE_LOW_PRIORITY = [
     "discográfica", "disco", "álbum", "single"
 ]
 
-# Claves de X (Twitter) desde los secrets del repositorio
+# Claves de X desde el entorno
 TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
 TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
@@ -104,14 +104,13 @@ TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
 
-# Cliente de OpenAI (usa OPENAI_API_KEY del entorno)
+# Cliente OpenAI
 client = OpenAI()
 
 
-# ----------------- Utilidades de fecha ----------------- #
+# ----------------- Fecha ----------------- #
 
 def today_info():
-    """Devuelve (año, mes, día, nombre_mes) en Europa/Madrid."""
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
     year = now.year
@@ -126,29 +125,22 @@ def today_info():
     return year, month, day, month_name
 
 
-# ----------------- Scraper de hoyenlahistoria.com ----------------- #
+# ----------------- Scraper hoyenlahistoria ----------------- #
 
 def fetch_hoyenlahistoria_events():
-    """
-    Lee https://www.hoyenlahistoria.com/efemerides.php y devuelve
-    una lista de eventos con campos: year, text, raw.
-    """
     url = "https://www.hoyenlahistoria.com/efemerides.php"
     headers = {"User-Agent": USER_AGENT}
-
     resp = requests.get(url, headers=headers, timeout=25)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
     events = []
 
-    # Miramos todos los list items que empiezan con un año
     for li in soup.find_all("li"):
         text = " ".join(li.stripped_strings)
         if not text:
             continue
 
-        # Formato típico: "1501 el príncipe de Gales..."
         m = re.match(r"^(\d+)\s*(a\.C\.)?\s*(.*)", text)
         if not m:
             continue
@@ -160,7 +152,7 @@ def fetch_hoyenlahistoria_events():
             continue
 
         if era:
-            year = -year  # años a.C. negativos, por si algún día interesa
+            year = -year
 
         body = rest.strip()
         if not body:
@@ -176,7 +168,7 @@ def fetch_hoyenlahistoria_events():
     return events
 
 
-# ----------------- Scoring “imperial” con penalización a batallas guiris ----------------- #
+# ----------------- Scoring imperial ----------------- #
 
 def compute_score(ev):
     text = ev["text"]
@@ -193,39 +185,24 @@ def compute_score(ev):
     has_diplomatic = any(kw in t_low for kw in DIPLO_KEYWORDS)
     has_foreign = any(tok in t_low for tok in FOREIGN_TOKENS)
 
-    # Núcleo: España/Imperio como actor → MUY arriba
     if has_spanish_actor:
         score += 35
-
-    # Marca España amplia (España, hispania, ciudades históricas, etc.)
     if has_spanish_wide:
         score += 18
-
-    # Teatro en España suma, pero menos
     if has_spanish_theatre:
         score += 5
-
-    # Militar suma bastante (prioriza batallas)
     if has_military:
         score += 12
-
-    # Diplomático (tratados, acuerdos, etc.) también suma
     if has_diplomatic:
         score += 8
 
-    # Penalizar fuerte cosas de premios/cultura pop
     for kw in CULTURE_LOW_PRIORITY:
         if kw in t_low:
             score -= 12
 
-    # Bonus por siglos interesantes (1500–1899 aprox.)
     if 1400 <= year <= 1899:
         score += 5
 
-    # Penalización clave:
-    # Si es evento MILITAR, con actores claramente extranjeros,
-    # y España solo aparece de fondo (sin ser actor),
-    # lo hundimos para que no gane a una efeméride española normal.
     if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
         score -= 40
 
@@ -239,29 +216,24 @@ def compute_score(ev):
 
 
 def choose_best_event(events):
-    """
-    Elige el evento con mayor score según compute_score.
-    Siempre devuelve algo si hay eventos.
-    """
     if not events:
         return None
-
     for ev in events:
         compute_score(ev)
-
-    best = max(events, key=lambda e: e["score"])
-    return best
+    return max(events, key=lambda e: e["score"])
 
 
-# ----------------- IMÁGENES: Wikimedia Commons (mejor búsqueda por nombres propios) ----------------- #
+# ----------------- IMÁGENES: Commons (solo si matchea por nombre propio) ----------------- #
 
 def extract_name_queries(text):
     """
-    A partir del texto del evento, extrae posibles nombres propios
-    ("Catalina de Aragón", "Arturo Tudor", "Reyes Católicos", etc.)
-    y construye queries para Wikimedia Commons.
+    Saca posibles nombres propios compuestos del texto:
+    - "Catalina de Aragón"
+    - "Arturo Tudor"
+    - "Reyes Católicos"
+    etc.
+    Devuelve una lista de nombres (sin "retrato"/"pintura").
     """
-    # Patrón para secuencias Capitalizadas (con posibles "de" intermedios)
     pattern = re.compile(
         r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+"
         r"(?:\s+de\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*"
@@ -269,9 +241,8 @@ def extract_name_queries(text):
     )
 
     raw_names = pattern.findall(text)
-    candidates = []
+    names = []
 
-    # Palabras sueltas genéricas que NO queremos tomar como nombre en solitario
     generic_single_words = {
         "El", "La", "Los", "Las",
         "Rey", "Reina", "Reyes", "Príncipe", "Princesa",
@@ -283,32 +254,38 @@ def extract_name_queries(text):
         name = name.strip().strip(",.;:()")
         if not name:
             continue
-        # Si es una sola palabra y genérica, fuera
         parts = name.split()
         if len(parts) == 1 and parts[0] in generic_single_words:
             continue
-        if name not in candidates:
-            candidates.append(name)
+        if name not in names:
+            names.append(name)
 
-    # Para cada nombre, generamos varias queries
-    queries = []
-    for name in candidates:
-        queries.append(name)
-        queries.append(f"{name} retrato")
-        queries.append(f"{name} pintura")
-
-    return queries
+    return names
 
 
 def fetch_commons_image_url(event):
     """
-    Busca una imagen en Wikimedia Commons relacionada con el texto del evento,
-    priorizando nombres propios (Catalina de Aragón, etc.).
-    Solo acepta imágenes con licencia 'Public domain' o 'CC0'.
-    Devuelve la URL de la imagen (thumb) o None si no encuentra nada adecuado.
+    Busca una imagen en Wikimedia Commons SOLO si encuentra coincidencia clara
+    con nombres propios del evento.
+    - Extrae nombres propios (Catalina de Aragón, etc.).
+    - Para cada nombre genera queries ("nombre", "nombre retrato", "nombre pintura").
+    - Busca en Commons y sólo acepta archivos:
+        * con licencia Public Domain o CC0
+        * cuyo título contenga alguno de esos nombres (lowercase).
+    Si no encuentra nada, devuelve None y ese día se publica sin imagen.
     """
     base_url = "https://commons.wikimedia.org/w/api.php"
     headers = {"User-Agent": USER_AGENT}
+
+    text = event["text"]
+    names = extract_name_queries(text)
+    print("Nombres propios detectados en el evento:", names)
+
+    if not names:
+        print("ℹ️ No se han detectado nombres propios claros; no se usará imagen.")
+        return None
+
+    allowed_substrings = [n.lower() for n in names]
 
     def search_commons(q):
         params = {
@@ -317,8 +294,8 @@ def fetch_commons_image_url(event):
             "prop": "imageinfo",
             "generator": "search",
             "gsrsearch": q,
-            "gsrlimit": 10,
-            "gsrnamespace": 6,  # File:
+            "gsrlimit": 15,
+            "gsrnamespace": 6,
             "iiprop": "url|extmetadata",
             "iiurlwidth": 1200,
             "iiextmetadata": 1,
@@ -329,6 +306,10 @@ def fetch_commons_image_url(event):
         pages = data.get("query", {}).get("pages", {})
         candidates = []
         for _, page in pages.items():
+            title = page.get("title", "").lower()
+            if not any(sub in title for sub in allowed_substrings):
+                # Título no menciona ningún nombre propio → descartamos
+                continue
             infos = page.get("imageinfo", [])
             if not infos:
                 continue
@@ -338,64 +319,33 @@ def fetch_commons_image_url(event):
                 continue
             extmeta = ii.get("extmetadata", {})
             lic = extmeta.get("LicenseShortName", {}).get("value", "").lower()
-            # Aceptamos solo dominio público / CC0
             if "public domain" in lic or "cc0" in lic:
                 candidates.append(url)
         return candidates
 
-    text = event["text"]
+    # Construir queries a partir de nombres
+    queries = []
+    for n in names:
+        queries.append(n)
+        queries.append(f"{n} retrato")
+        queries.append(f"{n} pintura")
 
-    # 1) Queries basadas en nombres propios
-    name_queries = extract_name_queries(text)
-    # 2) Query de respaldo con el texto del evento recortado
-    fallback_query = text
-    if len(fallback_query) > 120:
-        fallback_query = fallback_query[:120]
+    print("Queries que se probarán en Commons:", queries)
 
-    print("Posibles queries de nombres propios:", name_queries)
-
-    # Intentar primero con nombres propios y sus variantes
-    for q in name_queries:
+    for q in queries:
         try:
             cands = search_commons(q)
             if cands:
-                print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para query de nombre propio: {q!r}")
+                print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para query: {q!r}")
                 return cands[0]
         except Exception as e:
-            print("⚠️ Error buscando imagen en Commons (nombre propio):", e)
+            print("⚠️ Error buscando imagen en Commons (query nombre):", e)
 
-    # Intentar con el texto completo del evento (recortado)
-    try:
-        cands = search_commons(fallback_query)
-        if cands:
-            print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para query de texto: {fallback_query!r}")
-            return cands[0]
-    except Exception as e:
-        print("⚠️ Error buscando imagen en Commons (texto evento):", e)
-
-    # Intentos genéricos (mapas, tercios, etc.)
-    generic_queries = [
-        "Imperio español mapa",
-        "Historia de España pintura",
-        "Tercios españoles",
-    ]
-    for gq in generic_queries:
-        try:
-            cands = search_commons(gq)
-            if cands:
-                print(f"✅ Encontradas {len(cands)} imágenes PD/CC0 en Commons para búsqueda genérica: {gq!r}")
-                return cands[0]
-        except Exception as e:
-            print("⚠️ Error buscando imagen en Commons (query genérica):", e)
-
-    print("⚠️ No se ha encontrado imagen adecuada en Wikimedia Commons.")
+    print("ℹ️ No se ha encontrado imagen adecuadamente asociada a los nombres propios; se publicará sin imagen.")
     return None
 
 
 def download_image(url, filename="tweet_image.jpg"):
-    """
-    Descarga la imagen en 'url' a un fichero local y devuelve la ruta.
-    """
     headers = {"User-Agent": USER_AGENT}
     r = requests.get(url, headers=headers, timeout=25)
     r.raise_for_status()
@@ -404,14 +354,9 @@ def download_image(url, filename="tweet_image.jpg"):
     return filename
 
 
-# ----------------- Generación de TEXTO con OpenAI ----------------- #
+# ----------------- Texto con OpenAI ----------------- #
 
 def generate_headline_tweet(today_year, today_month_name, today_day, event):
-    """
-    Genera el tuit TITULAR (con banderita, fecha, año del suceso y hashtags).
-    Formato:
-    '🇪🇸 14 de noviembre de 2025: En tal día como hoy del año XXXX, ... #TalDiaComoHoy #España #HistoriaDeEspaña #Efemérides'
-    """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
     event_year = event["year"]
     event_text = event["text"]
@@ -455,11 +400,9 @@ Reglas importantes:
 
     text = completion.choices[0].message.content.strip()
 
-    # Recorte de seguridad
     if len(text) > 275:
         text = text[:272].rstrip() + "..."
 
-    # Seguridad extra: si por lo que sea no empieza como debe, lo forzamos mínimamente
     prefix = f"🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
     if not text.startswith(prefix):
         core_desc = event_text
@@ -473,14 +416,6 @@ Reglas importantes:
 
 
 def generate_followup_tweets(today_year, today_month_name, today_day, event):
-    """
-    Genera entre 1 y 5 tuits adicionales que irán como respuestas (hilo).
-    - Sin fecha ni fórmula 'En tal día como hoy...'
-    - Sin hashtags.
-    - Sin emojis.
-    - Explican por qué ese hecho/figura fue importante para España/Imperio.
-    Devuelve una lista de strings.
-    """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
     event_year = event["year"]
     event_text = event["text"]
@@ -539,12 +474,12 @@ FORMATO DE RESPUESTA:
         if isinstance(data, list):
             for item in data:
                 if isinstance(item, str):
-                    text = item.strip()
-                    if not text:
+                    t = item.strip()
+                    if not t:
                         continue
-                    if len(text) > 275:
-                        text = text[:272].rstrip() + "..."
-                    tweets.append(text)
+                    if len(t) > 275:
+                        t = t[:272].rstrip() + "..."
+                    tweets.append(t)
     except Exception as e:
         print("⚠️ No se ha podido parsear el JSON de followups:", e)
         print("Contenido bruto devuelto por OpenAI:")
@@ -557,7 +492,7 @@ FORMATO DE RESPUESTA:
     return tweets
 
 
-# ----------------- Publicación en X (API v2 + media upload v1.1) ----------------- #
+# ----------------- Twitter/X ----------------- #
 
 def get_twitter_client_and_api():
     if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
@@ -580,7 +515,6 @@ def get_twitter_client_and_api():
         bearer_token=TW_BEARER_TOKEN,
     )
 
-    # API v1.1 SOLO para subir media (permitido en tu plan)
     auth = tweepy.OAuth1UserHandler(
         TW_API_KEY, TW_API_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_SECRET
     )
@@ -590,12 +524,8 @@ def get_twitter_client_and_api():
 
 
 def post_thread(headline, followups, event):
-    """
-    Publica el tuit titular (con imagen si se encuentra) y, si hay followups, va respondiendo en hilo.
-    """
     client_tw, api_v1 = get_twitter_client_and_api()
 
-    # 1) Intentar conseguir imagen de Commons
     media_ids = None
     try:
         img_url = fetch_commons_image_url(event)
@@ -605,12 +535,11 @@ def post_thread(headline, followups, event):
             media_ids = [media.media_id_string]
             print(f"✅ Imagen subida a X con media_id={media.media_id_string}")
         else:
-            print("ℹ️ No se adjuntará imagen en el tuit titular (no se encontró adecuada).")
+            print("ℹ️ No se adjuntará imagen en el tuit titular.")
     except Exception as e:
         print("⚠️ Error subiendo imagen a X, se publicará sin imagen:", e)
         media_ids = None
 
-    # 2) Publicar titular (con o sin imagen)
     if media_ids:
         resp = client_tw.create_tweet(text=headline, media_ids=media_ids)
     else:
@@ -622,7 +551,6 @@ def post_thread(headline, followups, event):
         print("⚠️ No se obtuvo ID del tuit titular, no se puede continuar el hilo.")
         return
 
-    # 3) Publicar respuestas encadenadas
     parent_id = tweet_id
     for t in followups:
         try:
@@ -640,10 +568,8 @@ def post_thread(headline, followups, event):
 
 def main():
     today_year, today_month, today_day, today_month_name = today_info()
-
     print(f"Hoy es {today_day}/{today_month}/{today_year} ({today_month_name}).")
 
-    # 1) Obtener eventos de hoy en la web
     try:
         events = fetch_hoyenlahistoria_events()
         print(f"Se han encontrado {len(events)} eventos en hoyenlahistoria.com")
@@ -656,7 +582,6 @@ def main():
         print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    # 2) Elegir el mejor evento según scoring
     best = choose_best_event(events)
     if not best:
         print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
@@ -675,7 +600,6 @@ def main():
         f"Extranjeros: {best.get('has_foreign')}"
     )
 
-    # 3) Generar el tuit titular
     try:
         headline = generate_headline_tweet(today_year, today_month_name, today_day, best)
     except Exception as e:
@@ -686,7 +610,6 @@ def main():
     print(headline)
     print(f"Largo: {len(headline)} caracteres")
 
-    # 4) Generar los tuits de hilo (2º a 6º)
     try:
         followups = generate_followup_tweets(today_year, today_month_name, today_day, best)
     except Exception as e:
@@ -697,7 +620,6 @@ def main():
     for i, t in enumerate(followups, start=2):
         print(f"[Tuit {i}] {t} (len={len(t)})")
 
-    # 5) Publicar hilo en X (con imagen si se encontró)
     try:
         post_thread(headline, followups, best)
         print("✅ Hilo publicado correctamente.")
