@@ -54,7 +54,7 @@ SPANISH_WIDE_TOKENS = [
     "radio barcelona",
 ]
 
-# Teatro en suelo español (puede ser guiris dándose de hostias en nuestra costa)
+# Teatro en suelo español
 SPANISH_THEATRE_TOKENS = [
     "málaga", "cádiz", "cartagena", "cartagena de indias",
     "barcelona", "valencia", "bilbao", "santander", "la coruña",
@@ -69,7 +69,7 @@ MILITARY_KEYWORDS = [
     "ejército", "toma", "capitulación", "ofensiva", "defensiva",
 ]
 
-# Diplomacia / acuerdos / alianzas
+# Diplomacia
 DIPLO_KEYWORDS = [
     "tratado", "acuerdo", "paz", "alianza",
     "capitulaciones", "concordia",
@@ -87,7 +87,7 @@ FOREIGN_TOKENS = [
     "japonés", "japonesa", "japón",
 ]
 
-# Cosas que penalizamos (cultura/pop blanda)
+# Cosas que penalizamos
 CULTURE_LOW_PRIORITY = [
     "premio", "premios", "concurso", "festival", "certamen",
     "programa de radio", "programa de televisión", "radio", "televisión",
@@ -95,7 +95,7 @@ CULTURE_LOW_PRIORITY = [
     "discográfica", "disco", "álbum", "single"
 ]
 
-# Claves de X (Twitter) desde los secrets del repositorio
+# Claves de X
 TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
 TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
@@ -104,14 +104,127 @@ TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
 
-# Cliente de OpenAI (usa OPENAI_API_KEY del entorno)
+# Cliente OpenAI
 client = OpenAI()
+
+# ID numérico de tu cuenta:
+TWITTER_USER_ID = "1988838626760032256"
+
+
+# ----------------- NUEVO: obtener tuits antiguos para evitar repetidos ----------------- #
+
+def fetch_previous_events_same_day(month, day):
+    """
+    Obtiene los tuits TITULARES publicados en años anteriores en este mismo día
+    para detectar efemérides ya usadas.
+    """
+    if not TW_BEARER_TOKEN:
+        return []
+
+    cli = tweepy.Client(bearer_token=TW_BEARER_TOKEN)
+
+    old_texts = []
+    pagination_token = None
+
+    # buscamos texto que empiece por "🇪🇸 {día} de {mes}"
+    search_prefix = f"🇪🇸 {day} de "
+
+    for _ in range(5):  # límite defensivo
+        resp = cli.get_users_tweets(
+            id=TWITTER_USER_ID,
+            max_results=100,
+            pagination_token=pagination_token,
+            tweet_fields=["created_at", "text"]
+        )
+        if not resp.data:
+            break
+
+        for t in resp.data:
+            txt = t.text
+            if search_prefix in txt:
+                old_texts.append(txt.lower())
+
+        pagination_token = resp.meta.get("next_token")
+        if not pagination_token:
+            break
+
+    return old_texts
+
+
+def event_is_repeated(event_text, old_texts):
+    """
+    Comprueba si un evento ya fue tratado comparando tokens clave.
+    """
+    t = event_text.lower()
+
+    key_fragments = [
+        *SPANISH_ACTOR_TOKENS,
+        *SPANISH_WIDE_TOKENS,
+        *MILITARY_KEYWORDS,
+        *DIPLO_KEYWORDS
+    ]
+
+    for prev in old_texts:
+        matches = 0
+        for k in key_fragments:
+            if k in t and k in prev:
+                matches += 1
+        if matches >= 2:
+            return True
+
+    return False
+
+
+# ----------------- NUEVO: detector de contradicciones ----------------- #
+
+def detect_and_fix_contradictions(headline, followups, event_text):
+    """
+    Detecta contradicciones internas usando modelo y reescribe los tuits conflictivos.
+    """
+    all_tweets = [headline] + followups
+
+    prompt = f"""
+Analiza estos tuits y detecta contradicciones internas en fechas, cifras, nombres, lugares o hechos:
+
+EFEMÉRIDE ORIGINAL:
+\"\"\"{event_text}\"\"\"
+
+TUITS DEL HILO:
+{json.dumps(all_tweets, ensure_ascii=False, indent=2)}
+
+Devuelve EXCLUSIVAMENTE un JSON con la siguiente forma:
+{{
+  "fixed": ["tuit1", "tuit2", ...]   ← MISMO NÚMERO DE TUITES, corregidos
+}}
+No añadas nada más.
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "Corrige contradicciones internas respetando el estilo original."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        max_tokens=800
+    )
+
+    raw = resp.choices[0].message.content.strip()
+
+    try:
+        data = json.loads(raw)
+        fixed = data.get("fixed", [])
+        if isinstance(fixed, list) and len(fixed) == len(all_tweets):
+            return fixed[0], fixed[1:]
+    except:
+        pass
+
+    return headline, followups
 
 
 # ----------------- Utilidades de fecha ----------------- #
 
 def today_info():
-    """Devuelve (año, mes, día, nombre_mes) en Europa/Madrid."""
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
     year = now.year
@@ -126,13 +239,9 @@ def today_info():
     return year, month, day, month_name
 
 
-# ----------------- Scraper de hoyenlahistoria.com ----------------- #
+# ----------------- Scraper hoyenlahistoria ----------------- #
 
 def fetch_hoyenlahistoria_events():
-    """
-    Lee https://www.hoyenlahistoria.com/efemerides.php y devuelve
-    una lista de eventos con campos: year, text, raw.
-    """
     url = "https://www.hoyenlahistoria.com/efemerides.php"
     headers = {"User-Agent": USER_AGENT}
 
@@ -142,13 +251,11 @@ def fetch_hoyenlahistoria_events():
     soup = BeautifulSoup(resp.text, "html.parser")
     events = []
 
-    # Miramos todos los list items que empiezan con un año
     for li in soup.find_all("li"):
         text = " ".join(li.stripped_strings)
         if not text:
             continue
 
-        # Formato típico: "1501 el príncipe de Gales..."
         m = re.match(r"^(\d+)\s*(a\.C\.)?\s*(.*)", text)
         if not m:
             continue
@@ -160,7 +267,7 @@ def fetch_hoyenlahistoria_events():
             continue
 
         if era:
-            year = -year  # años a.C. negativos, por si algún día interesa
+            year = -year
 
         body = rest.strip()
         if not body:
@@ -176,7 +283,7 @@ def fetch_hoyenlahistoria_events():
     return events
 
 
-# ----------------- Scoring “imperial” con penalización a batallas guiris ----------------- #
+# ----------------- Scoring ----------------- #
 
 def compute_score(ev):
     text = ev["text"]
@@ -188,44 +295,28 @@ def compute_score(ev):
     has_spanish_actor = any(tok in t_low for tok in SPANISH_ACTOR_TOKENS)
     has_spanish_wide = any(tok in t_low for tok in SPANISH_WIDE_TOKENS)
     has_spanish_theatre = any(tok in t_low for tok in SPANISH_THEATRE_TOKENS)
-
     has_military = any(kw in t_low for kw in MILITARY_KEYWORDS)
     has_diplomatic = any(kw in t_low for kw in DIPLO_KEYWORDS)
     has_foreign = any(tok in t_low for tok in FOREIGN_TOKENS)
 
-    # Núcleo: España/Imperio como actor → MUY arriba
     if has_spanish_actor:
         score += 35
-
-    # Marca España amplia (España, hispania, ciudades históricas, etc.)
     if has_spanish_wide:
         score += 18
-
-    # Teatro en España suma, pero menos
     if has_spanish_theatre:
         score += 5
-
-    # Militar suma bastante (prioriza batallas)
     if has_military:
         score += 12
-
-    # Diplomático (tratados, acuerdos, etc.) también suma
     if has_diplomatic:
         score += 8
 
-    # Penalizar fuerte cosas de premios/cultura pop
     for kw in CULTURE_LOW_PRIORITY:
         if kw in t_low:
             score -= 12
 
-    # Bonus por siglos interesantes (1500–1899 aprox.)
     if 1400 <= year <= 1899:
         score += 5
 
-    # Penalización clave:
-    # Si es evento MILITAR, con actores claramente extranjeros,
-    # y España solo aparece de fondo (sin ser actor),
-    # lo hundimos para que no gane a una efeméride española normal.
     if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
         score -= 40
 
@@ -238,29 +329,28 @@ def compute_score(ev):
     ev["has_foreign"] = has_foreign
 
 
-def choose_best_event(events):
+def choose_best_event(events, old_texts):
     """
-    Elige el evento con mayor score según compute_score.
-    Siempre devuelve algo si hay eventos.
+    Filtra eventos ya usados y elige el mejor.
     """
-    if not events:
-        return None
+    candidates = []
 
     for ev in events:
+        if event_is_repeated(ev["text"], old_texts):
+            continue
         compute_score(ev)
+        candidates.append(ev)
 
-    best = max(events, key=lambda e: e["score"])
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda e: e["score"])
     return best
 
 
-# ----------------- Generación de TEXTO con OpenAI ----------------- #
+# ----------------- Generación texto OpenAI ----------------- #
 
 def generate_headline_tweet(today_year, today_month_name, today_day, event):
-    """
-    Genera el tuit TITULAR (con banderita, fecha, año del suceso y hashtags).
-    Formato:
-    '🇪🇸 14 de noviembre de 2025: En tal día como hoy del año XXXX, ... #TalDiaComoHoy #España #HistoriaDeEspaña #Efemérides'
-    """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
     event_year = event["year"]
     event_text = event["text"]
@@ -272,30 +362,21 @@ Efeméride seleccionada (año {event_year}) procedente de un listado de efeméri
 
 \"\"\"{event_text}\"\"\"
 
-
 Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato general:
 
 "🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ... {hashtags}"
 
-Reglas importantes:
-- Máximo 260 caracteres en total (incluyendo los hashtags y la banderita).
-- Debe empezar EXACTAMENTE por: "🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
-  y a continuación una frase breve que resuma el hecho histórico.
-- Tono divulgativo, con cierto orgullo por la historia de España y su Imperio, sin más emojis, sin URLs y sin mencionar la fuente.
-- No añadas más hashtags que estos cuatro ni cambies su texto: {hashtags}.
-- No uses saltos de línea, todo debe ir en una sola frase.
+Reglas:
+- Máx 260 caracteres.
+- Sin emojis adicionales.
+- Sin URLs.
+- Solo esos hashtags.
 """
 
     completion = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Eres un divulgador de historia de España y del Imperio español. "
-                    "Escribes tuits breves, claros y con ligero tono épico, respetando estrictamente el formato pedido."
-                ),
-            },
+            {"role": "system", "content": "Eres divulgador..."},
             {"role": "user", "content": prompt_user},
         ],
         temperature=0.4,
@@ -304,14 +385,11 @@ Reglas importantes:
 
     text = completion.choices[0].message.content.strip()
 
-    # Recorte de seguridad
     if len(text) > 275:
         text = text[:272].rstrip() + "..."
 
-    # Seguridad extra: si por lo que sea no empieza como debe, lo forzamos mínimamente
     prefix = f"🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
     if not text.startswith(prefix):
-        # Extraemos solo la parte descriptiva
         core_desc = event_text
         if len(core_desc) > 150:
             core_desc = core_desc[:147].rstrip() + "..."
@@ -323,16 +401,6 @@ Reglas importantes:
 
 
 def generate_followup_tweets(today_year, today_month_name, today_day, event):
-    """
-    Genera entre 1 y 5 tuits adicionales que irán como respuestas (hilo).
-    - Sin fecha ni fórmula 'En tal día como hoy...'
-    - Sin hashtags.
-    - Sin emojis.
-    - Explican por qué ese hecho/f
-
-ue importante para España/Imperio, consecuencias, etc.
-    Devuelve una lista de strings.
-    """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
     event_year = event["year"]
     event_text = event["text"]
@@ -343,40 +411,14 @@ Efeméride seleccionada (año {event_year}):
 
 \"\"\"{event_text}\"\"\"
 
-
-Vas a escribir un HILO que continúa el tuit titular (que ya dice:
-"🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ...").
-
-Tu tarea:
-- Redacta entre 1 y 5 tuits adicionales (no el titular) que expliquen:
-  - qué supuso este hecho para España o para el Imperio español,
-  - o por qué la figura implicada fue importante para España/Imperio,
-  - consecuencias a corto y largo plazo,
-  - contexto histórico relevante (sin irte del tema).
-- Cada tuit debe:
-  - estar en español,
-  - tener como máximo 260 caracteres,
-  - NO empezar por la fecha ni por "En tal día como hoy...",
-  - NO incluir hashtags,
-  - NO incluir emojis,
-  - ser autosuficiente pero encajar como parte de una pequeña historia enlazada.
-
-FORMATO DE RESPUESTA:
-- Devuélveme EXCLUSIVAMENTE un JSON con una lista de strings, por ejemplo:
-  ["texto del tuit 2", "texto del tuit 3", "..."]
-- No añadas nada fuera del JSON.
+Escribe entre 1 y 5 tuits adicionales. Sin fechas, sin "En tal día...", sin hashtags, sin emojis.
+Devuelve únicamente JSON con una lista de strings.
 """
 
     completion = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Eres un divulgador de historia de España y del Imperio español. "
-                    "Escribes hilos de X breves, claros y ordenados, respetando estrictamente el formato pedido."
-                ),
-            },
+            {"role": "system", "content": "Eres divulgador..."},
             {"role": "user", "content": prompt_user},
         ],
         temperature=0.6,
@@ -394,37 +436,23 @@ FORMATO DE RESPUESTA:
                     text = item.strip()
                     if not text:
                         continue
-                    # Recorte de seguridad
                     if len(text) > 275:
                         text = text[:272].rstrip() + "..."
                     tweets.append(text)
-    except Exception as e:
-        print("⚠️ No se ha podido parsear el JSON de followups:", e)
-        print("Contenido bruto devuelto por OpenAI:")
-        print(raw)
+    except:
         tweets = []
 
-    # Garantizar entre 1 y 5 si hay algo; si no hay nada, devolvemos lista vacía
     if len(tweets) > 5:
         tweets = tweets[:5]
 
     return tweets
 
 
-# ----------------- Publicación en X (API v2) ----------------- #
+# ----------------- Publicación X ----------------- #
 
 def get_twitter_client():
     if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
         raise RuntimeError("Faltan claves de Twitter/X en las variables de entorno.")
-
-    print(
-        "DEBUG Twitter keys present:",
-        bool(TW_API_KEY),
-        bool(TW_API_SECRET),
-        bool(TW_ACCESS_TOKEN),
-        bool(TW_ACCESS_SECRET),
-        bool(TW_BEARER_TOKEN),
-    )
 
     client_tw = tweepy.Client(
         consumer_key=TW_API_KEY,
@@ -437,30 +465,21 @@ def get_twitter_client():
 
 
 def post_thread(headline, followups):
-    """
-    Publica el tuit titular y, si hay followups, va respondiendo en hilo.
-    """
     client_tw = get_twitter_client()
 
-    # Publicar titular
     resp = client_tw.create_tweet(text=headline)
-    print("DEBUG create_tweet (headline) response:", resp)
     tweet_id = resp.data.get("id")
     if not tweet_id:
-        print("⚠️ No se obtuvo ID del tuit titular, no se puede continuar el hilo.")
         return
 
-    # Publicar respuestas encadenadas
     parent_id = tweet_id
     for t in followups:
         try:
             resp = client_tw.create_tweet(text=t, in_reply_to_tweet_id=parent_id)
-            print("DEBUG create_tweet (reply) response:", resp)
             new_id = resp.data.get("id")
             if new_id:
                 parent_id = new_id
-        except Exception as e:
-            print("❌ Error publicando un tuit de hilo:", e)
+        except:
             break
 
 
@@ -471,66 +490,48 @@ def main():
 
     print(f"Hoy es {today_day}/{today_month}/{today_year} ({today_month_name}).")
 
-    # 1) Obtener eventos de hoy en la web
     try:
         events = fetch_hoyenlahistoria_events()
-        print(f"Se han encontrado {len(events)} eventos en hoyenlahistoria.com")
+        print(f"Se han encontrado {len(events)} eventos.")
     except Exception as e:
-        print("❌ Error obteniendo eventos de hoyenlahistoria.com:", e)
-        print("No se publicará ningún tuit hoy.")
+        print("❌ Error obteniendo eventos:", e)
         return
 
     if not events:
-        print("No hay eventos disponibles para hoy. No se publicará tuit.")
+        print("No hay eventos.")
         return
 
-    # 2) Elegir el mejor evento según scoring
-    best = choose_best_event(events)
+    # NUEVO: obtener tuits antiguos de este día
+    old_texts = fetch_previous_events_same_day(today_month, today_day)
+
+    # NUEVO: elegir evento evitando repetidos
+    best = choose_best_event(events, old_texts)
     if not best:
-        print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
+        print("No hay efemérides nuevas para este día.")
         return
 
     print("Evento elegido:")
-    print(f"- Año: {best['year']}")
-    print(f"- Texto: {best['text']}")
-    print(f"- Score: {best.get('score', 'N/A')}")
-    print(
-        f"- ActorEsp: {best.get('has_spanish_actor')}, "
-        f"EspAmplio: {best.get('has_spanish_wide')}, "
-        f"TeatroEsp: {best.get('has_spanish_theatre')}, "
-        f"Militar: {best.get('has_military')}, "
-        f"Diplomático: {best.get('has_diplomatic')}, "
-        f"Extranjeros: {best.get('has_foreign')}"
-    )
+    print(best)
 
-    # 3) Generar el tuit titular
     try:
         headline = generate_headline_tweet(today_year, today_month_name, today_day, best)
     except Exception as e:
-        print("❌ Error al generar el tuit titular con OpenAI:", e)
+        print("❌ Error titular:", e)
         return
 
-    print("Tuit titular generado:")
-    print(headline)
-    print(f"Largo: {len(headline)} caracteres")
-
-    # 4) Generar los tuits de hilo (2º a 6º)
     try:
         followups = generate_followup_tweets(today_year, today_month_name, today_day, best)
-    except Exception as e:
-        print("⚠️ Error generando los tuits de hilo con OpenAI:", e)
+    except:
         followups = []
 
-    print(f"Se han generado {len(followups)} tuits adicionales para el hilo.")
-    for i, t in enumerate(followups, start=2):
-        print(f"[Tuit {i}] {t} (len={len(t)})")
+    # NUEVO: detector de contradicciones
+    headline, followups = detect_and_fix_contradictions(headline, followups, best["text"])
 
-    # 5) Publicar hilo en X
     try:
         post_thread(headline, followups)
-        print("✅ Hilo publicado correctamente.")
+        print("✅ Publicado.")
     except Exception as e:
-        print("❌ Error publicando el hilo en Twitter/X:", e)
+        print("❌ Error publicando:", e)
         raise
 
 
