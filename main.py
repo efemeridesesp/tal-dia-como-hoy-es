@@ -36,7 +36,7 @@ SPANISH_ACTOR_TOKENS = [
     "corona de aragón",
 ]
 
-# “Marca España” amplia (aquí queremos que entren muchas cosas)
+# “Marca España” amplia
 SPANISH_WIDE_TOKENS = [
     "españa", "español", "española", "españoles",
     "hispania", "hispano", "hispánica",
@@ -54,14 +54,13 @@ SPANISH_WIDE_TOKENS = [
     "radio barcelona",
 ]
 
-# Teatro en suelo español
+# Teatro español
 SPANISH_THEATRE_TOKENS = [
     "málaga", "cádiz", "cartagena", "cartagena de indias",
     "barcelona", "valencia", "bilbao", "santander", "la coruña",
     "ceuta", "melilla", "baleares", "canarias",
 ]
 
-# Palabras claramente militares
 MILITARY_KEYWORDS = [
     "batalla", "guerra", "combate", "frente",
     "asedio", "sitio", "conquista", "derrota", "victoria", "alzamiento",
@@ -69,13 +68,11 @@ MILITARY_KEYWORDS = [
     "ejército", "toma", "capitulación", "ofensiva", "defensiva",
 ]
 
-# Diplomacia
 DIPLO_KEYWORDS = [
     "tratado", "acuerdo", "paz", "alianza",
     "capitulaciones", "concordia",
 ]
 
-# Nacionalidades extranjeras típicas
 FOREIGN_TOKENS = [
     "alemán", "alemana", "alemania", "nazi",
     "británico", "británica", "inglés", "inglesa", "inglaterra",
@@ -87,7 +84,6 @@ FOREIGN_TOKENS = [
     "japonés", "japonesa", "japón",
 ]
 
-# Cosas que penalizamos
 CULTURE_LOW_PRIORITY = [
     "premio", "premios", "concurso", "festival", "certamen",
     "programa de radio", "programa de televisión", "radio", "televisión",
@@ -95,7 +91,7 @@ CULTURE_LOW_PRIORITY = [
     "discográfica", "disco", "álbum", "single"
 ]
 
-# Claves de X
+# Claves X
 TW_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TW_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
 TW_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
@@ -104,45 +100,39 @@ TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
 
-# Cliente OpenAI
 client = OpenAI()
 
-# ID numérico de tu cuenta:
+# ID NUMÉRICO REAL DE TU CUENTA
 TWITTER_USER_ID = "1988838626760032256"
 
 
-# ----------------- NUEVO: obtener tuits antiguos para evitar repetidos ----------------- #
+# -------------------------------------------------------------
+# NUEVO: Obtener tuits antiguos de este mismo día (anti-repe)
+# -------------------------------------------------------------
 
 def fetch_previous_events_same_day(month, day):
-    """
-    Obtiene los tuits TITULARES publicados en años anteriores en este mismo día
-    para detectar efemérides ya usadas.
-    """
     if not TW_BEARER_TOKEN:
         return []
 
     cli = tweepy.Client(bearer_token=TW_BEARER_TOKEN)
-
     old_texts = []
     pagination_token = None
 
-    # buscamos texto que empiece por "🇪🇸 {día} de {mes}"
     search_prefix = f"🇪🇸 {day} de "
 
-    for _ in range(5):  # límite defensivo
+    for _ in range(5):
         resp = cli.get_users_tweets(
             id=TWITTER_USER_ID,
             max_results=100,
             pagination_token=pagination_token,
-            tweet_fields=["created_at", "text"]
+            tweet_fields=["created_at", "text"],
         )
         if not resp.data:
             break
 
         for t in resp.data:
-            txt = t.text
-            if search_prefix in txt:
-                old_texts.append(txt.lower())
+            if search_prefix in t.text:
+                old_texts.append(t.text.lower())
 
         pagination_token = resp.meta.get("next_token")
         if not pagination_token:
@@ -152,17 +142,14 @@ def fetch_previous_events_same_day(month, day):
 
 
 def event_is_repeated(event_text, old_texts):
-    """
-    Comprueba si un evento ya fue tratado comparando tokens clave.
-    """
     t = event_text.lower()
 
-    key_fragments = [
-        *SPANISH_ACTOR_TOKENS,
-        *SPANISH_WIDE_TOKENS,
-        *MILITARY_KEYWORDS,
-        *DIPLO_KEYWORDS
-    ]
+    key_fragments = (
+        SPANISH_ACTOR_TOKENS +
+        SPANISH_WIDE_TOKENS +
+        MILITARY_KEYWORDS +
+        DIPLO_KEYWORDS
+    )
 
     for prev in old_texts:
         matches = 0
@@ -175,38 +162,37 @@ def event_is_repeated(event_text, old_texts):
     return False
 
 
-# ----------------- NUEVO: detector de contradicciones ----------------- #
+# -------------------------------------------------------------
+# NUEVO: detector de contradicciones internas
+# -------------------------------------------------------------
 
 def detect_and_fix_contradictions(headline, followups, event_text):
-    """
-    Detecta contradicciones internas usando modelo y reescribe los tuits conflictivos.
-    """
     all_tweets = [headline] + followups
 
     prompt = f"""
-Analiza estos tuits y detecta contradicciones internas en fechas, cifras, nombres, lugares o hechos:
+Analiza estos tuits y elimina contradicciones internas.
 
-EFEMÉRIDE ORIGINAL:
+EFEMÉRIDE:
 \"\"\"{event_text}\"\"\"
 
-TUITS DEL HILO:
+TUITS:
 {json.dumps(all_tweets, ensure_ascii=False, indent=2)}
 
-Devuelve EXCLUSIVAMENTE un JSON con la siguiente forma:
+Devuelve SOLO:
+
 {{
-  "fixed": ["tuit1", "tuit2", ...]   ← MISMO NÚMERO DE TUITES, corregidos
+  "fixed": ["tuit1", "tuit2", ...]
 }}
-No añadas nada más.
 """
 
     resp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {"role": "system", "content": "Corrige contradicciones internas respetando el estilo original."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "Corrige contradicciones internas."},
+            {"role": "user", "content": prompt},
         ],
         temperature=0.2,
-        max_tokens=800
+        max_tokens=800,
     )
 
     raw = resp.choices[0].message.content.strip()
@@ -222,30 +208,22 @@ No añadas nada más.
     return headline, followups
 
 
-# ----------------- Utilidades de fecha ----------------- #
+# -------------------------------------------------------------
+# UTILIDADES
+# -------------------------------------------------------------
 
 def today_info():
     tz = pytz.timezone(TZ)
     now = datetime.datetime.now(tz)
-    year = now.year
-    month = now.month
-    day = now.day
+    year, month, day = now.year, now.month, now.day
+    meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    return year, month, day, meses[month]
 
-    meses = [
-        "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
-        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
-    ]
-    month_name = meses[month]
-    return year, month, day, month_name
-
-
-# ----------------- Scraper hoyenlahistoria ----------------- #
 
 def fetch_hoyenlahistoria_events():
     url = "https://www.hoyenlahistoria.com/efemerides.php"
-    headers = {"User-Agent": USER_AGENT}
-
-    resp = requests.get(url, headers=headers, timeout=25)
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=25)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -261,9 +239,10 @@ def fetch_hoyenlahistoria_events():
             continue
 
         year_str, era, rest = m.groups()
+
         try:
             year = int(year_str)
-        except ValueError:
+        except:
             continue
 
         if era:
@@ -277,78 +256,57 @@ def fetch_hoyenlahistoria_events():
             "year": year,
             "text": body,
             "raw": text,
-            "source": "hoyenlahistoria"
+            "source": "hoyenlahistoria",
         })
 
     return events
 
 
-# ----------------- Scoring ----------------- #
-
 def compute_score(ev):
-    text = ev["text"]
-    t_low = text.lower()
+    text = ev["text"].lower()
     year = ev["year"]
 
-    score = 0.0
+    score = 0
 
-    has_spanish_actor = any(tok in t_low for tok in SPANISH_ACTOR_TOKENS)
-    has_spanish_wide = any(tok in t_low for tok in SPANISH_WIDE_TOKENS)
-    has_spanish_theatre = any(tok in t_low for tok in SPANISH_THEATRE_TOKENS)
-    has_military = any(kw in t_low for kw in MILITARY_KEYWORDS)
-    has_diplomatic = any(kw in t_low for kw in DIPLO_KEYWORDS)
-    has_foreign = any(tok in t_low for tok in FOREIGN_TOKENS)
+    if any(tok in text for tok in SPANISH_ACTOR_TOKENS): score += 35
+    if any(tok in text for tok in SPANISH_WIDE_TOKENS): score += 18
+    if any(tok in text for tok in SPANISH_THEATRE_TOKENS): score += 5
+    if any(tok in text for tok in MILITARY_KEYWORDS): score += 12
+    if any(tok in text for tok in DIPLO_KEYWORDS): score += 8
 
-    if has_spanish_actor:
-        score += 35
-    if has_spanish_wide:
-        score += 18
-    if has_spanish_theatre:
-        score += 5
-    if has_military:
-        score += 12
-    if has_diplomatic:
-        score += 8
-
-    for kw in CULTURE_LOW_PRIORITY:
-        if kw in t_low:
+    for k in CULTURE_LOW_PRIORITY:
+        if k in text:
             score -= 12
 
     if 1400 <= year <= 1899:
         score += 5
 
-    if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
+    if (any(k in text for k in MILITARY_KEYWORDS)
+            and any(k in text for k in FOREIGN_TOKENS)
+            and not any(k in text for k in SPANISH_ACTOR_TOKENS)
+            and not any(k in text for k in DIPLO_KEYWORDS)):
         score -= 40
 
     ev["score"] = score
-    ev["has_spanish_actor"] = has_spanish_actor
-    ev["has_spanish_wide"] = has_spanish_wide
-    ev["has_spanish_theatre"] = has_spanish_theatre
-    ev["has_military"] = has_military
-    ev["has_diplomatic"] = has_diplomatic
-    ev["has_foreign"] = has_foreign
 
 
 def choose_best_event(events, old_texts):
-    """
-    Filtra eventos ya usados y elige el mejor.
-    """
-    candidates = []
-
+    filtered = []
     for ev in events:
         if event_is_repeated(ev["text"], old_texts):
             continue
         compute_score(ev)
-        candidates.append(ev)
+        filtered.append(ev)
 
-    if not candidates:
+    if not filtered:
         return None
 
-    best = max(candidates, key=lambda e: e["score"])
-    return best
+    return max(filtered, key=lambda e: e["score"])
 
 
-# ----------------- Generación texto OpenAI ----------------- #
+# -------------------------------------------------------------
+# GENERACIÓN OPENAI
+# -------------------------------------------------------------
 
 def generate_headline_tweet(today_year, today_month_name, today_day, event):
     today_str = f"{today_day} de {today_month_name} de {today_year}"
@@ -356,134 +314,99 @@ def generate_headline_tweet(today_year, today_month_name, today_day, event):
     event_text = event["text"]
     hashtags = " ".join(DEFAULT_HASHTAGS)
 
-    prompt_user = f"""
-Fecha de hoy: {today_str}.
-Efeméride seleccionada (año {event_year}) procedente de un listado de efemérides históricas:
-
-\"\"\"{event_text}\"\"\"
-
-Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato general:
+    prompt = f"""
+Escribe exactamente un tuit así:
 
 "🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ... {hashtags}"
 
-Reglas:
-- Máx 260 caracteres.
-- Sin emojis adicionales.
-- Sin URLs.
-- Solo esos hashtags.
+Máx 260 caracteres.
+Sin emojis extra.
+Sin URLs.
 """
 
-    completion = client.chat.completions.create(
+    out = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {"role": "system", "content": "Eres divulgador..."},
-            {"role": "user", "content": prompt_user},
+            {"role": "system", "content": "Eres divulgador épico español."},
+            {"role": "user", "content": prompt},
         ],
         temperature=0.4,
         max_tokens=200,
     )
 
-    text = completion.choices[0].message.content.strip()
+    text = out.choices[0].message.content.strip()
 
     if len(text) > 275:
         text = text[:272].rstrip() + "..."
-
-    prefix = f"🇪🇸 {today_str}: En tal día como hoy del año {event_year},"
-    if not text.startswith(prefix):
-        core_desc = event_text
-        if len(core_desc) > 150:
-            core_desc = core_desc[:147].rstrip() + "..."
-        text = f"{prefix} {core_desc} {hashtags}"
-        if len(text) > 275:
-            text = text[:272].rstrip() + "..."
 
     return text
 
 
 def generate_followup_tweets(today_year, today_month_name, today_day, event):
     today_str = f"{today_day} de {today_month_name} de {today_year}"
-    event_year = event["year"]
-    event_text = event["text"]
 
-    prompt_user = f"""
-Fecha de hoy: {today_str}.
-Efeméride seleccionada (año {event_year}):
-
-\"\"\"{event_text}\"\"\"
-
-Escribe entre 1 y 5 tuits adicionales. Sin fechas, sin "En tal día...", sin hashtags, sin emojis.
-Devuelve únicamente JSON con una lista de strings.
+    prompt = f"""
+Redacta 1–5 tuits de hilo, sin emojis, sin hashtags, sin fecha.
+Devuelve SOLO un JSON: ["tuit2", "tuit3", ...]
 """
 
-    completion = client.chat.completions.create(
+    out = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {"role": "system", "content": "Eres divulgador..."},
-            {"role": "user", "content": prompt_user},
+            {"role": "system", "content": "Eres divulgador."},
+            {"role": "user", "content": prompt},
         ],
         temperature=0.6,
         max_tokens=400,
     )
 
-    raw = completion.choices[0].message.content.strip()
+    raw = out.choices[0].message.content.strip()
 
     tweets = []
     try:
         data = json.loads(raw)
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, str):
-                    text = item.strip()
-                    if not text:
-                        continue
-                    if len(text) > 275:
-                        text = text[:272].rstrip() + "..."
-                    tweets.append(text)
+        for t in data:
+            if len(t) > 275:
+                t = t[:272] + "..."
+            tweets.append(t)
     except:
-        tweets = []
+        pass
 
-    if len(tweets) > 5:
-        tweets = tweets[:5]
-
-    return tweets
+    return tweets[:5]
 
 
-# ----------------- Publicación X ----------------- #
+# -------------------------------------------------------------
+# PUBLICAR
+# -------------------------------------------------------------
 
 def get_twitter_client():
-    if not (TW_API_KEY and TW_API_SECRET and TW_ACCESS_TOKEN and TW_ACCESS_SECRET and TW_BEARER_TOKEN):
-        raise RuntimeError("Faltan claves de Twitter/X en las variables de entorno.")
-
-    client_tw = tweepy.Client(
+    return tweepy.Client(
         consumer_key=TW_API_KEY,
         consumer_secret=TW_API_SECRET,
         access_token=TW_ACCESS_TOKEN,
         access_token_secret=TW_ACCESS_SECRET,
         bearer_token=TW_BEARER_TOKEN,
     )
-    return client_tw
 
 
 def post_thread(headline, followups):
     client_tw = get_twitter_client()
 
     resp = client_tw.create_tweet(text=headline)
-    tweet_id = resp.data.get("id")
-    if not tweet_id:
+    tid = resp.data.get("id")
+    if not tid:
         return
 
-    parent_id = tweet_id
+    parent = tid
     for t in followups:
-        try:
-            resp = client_tw.create_tweet(text=t, in_reply_to_tweet_id=parent_id)
-            new_id = resp.data.get("id")
-            if new_id:
-                parent_id = new_id
-        except:
-            break
+        r = client_tw.create_tweet(text=t, in_reply_to_tweet_id=parent)
+        if r.data.get("id"):
+            parent = r.data["id"]
 
 
-# ----------------- Main ----------------- #
+# -------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------
 
 def main():
     today_year, today_month, today_day, today_month_name = today_info()
@@ -492,47 +415,56 @@ def main():
 
     try:
         events = fetch_hoyenlahistoria_events()
-        print(f"Se han encontrado {len(events)} eventos.")
     except Exception as e:
-        print("❌ Error obteniendo eventos:", e)
+        print("❌ Error eventos:", e)
         return
 
     if not events:
-        print("No hay eventos.")
+        print("No hay eventos")
         return
 
-    # NUEVO: obtener tuits antiguos de este día
     old_texts = fetch_previous_events_same_day(today_month, today_day)
 
-    # NUEVO: elegir evento evitando repetidos
     best = choose_best_event(events, old_texts)
     if not best:
-        print("No hay efemérides nuevas para este día.")
+        print("No hay efemérides nuevas")
         return
 
-    print("Evento elegido:")
-    print(best)
-
+    # -----------------------------------------------
+    # GENERAR TITULAR
+    # -----------------------------------------------
     try:
         headline = generate_headline_tweet(today_year, today_month_name, today_day, best)
     except Exception as e:
         print("❌ Error titular:", e)
         return
 
+    # NUEVO: evitar tuit vacío o None
+    if not headline or not isinstance(headline, str) or len(headline.strip()) == 0:
+        print("❌ OpenAI devolvió titular vacío. Abortando.")
+        return
+
+    # -----------------------------------------------
+    # FOLLOWUPS
+    # -----------------------------------------------
     try:
         followups = generate_followup_tweets(today_year, today_month_name, today_day, best)
     except:
         followups = []
 
-    # NUEVO: detector de contradicciones
+    # -----------------------------------------------
+    # DETECTAR Y CORREGIR CONTRADICCIONES
+    # -----------------------------------------------
     headline, followups = detect_and_fix_contradictions(headline, followups, best["text"])
 
+    # -----------------------------------------------
+    # PUBLICAR
+    # -----------------------------------------------
     try:
         post_thread(headline, followups)
         print("✅ Publicado.")
     except Exception as e:
         print("❌ Error publicando:", e)
-        raise
 
 
 if __name__ == "__main__":
