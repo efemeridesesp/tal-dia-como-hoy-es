@@ -107,6 +107,127 @@ USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-c
 # Cliente de OpenAI (usa OPENAI_API_KEY del entorno)
 client = OpenAI()
 
+# ID numérico de tu cuenta
+TWITTER_USER_ID = "1988838626760032256"
+
+
+# ----------------- NUEVO: evitar repetir efemérides ya publicadas ----------------- #
+
+def fetch_previous_events_same_day(month, day):
+    """
+    Obtiene los tuits TITULARES publicados en años anteriores en este mismo día
+    para detectar efemérides ya usadas. Si hay rate limit (429), devolvemos []
+    para no romper el workflow.
+    """
+    if not TW_BEARER_TOKEN:
+        return []
+
+    cli = tweepy.Client(bearer_token=TW_BEARER_TOKEN)
+    old_texts = []
+    pagination_token = None
+
+    search_prefix = f"🇪🇸 {day} de "
+
+    for _ in range(6):  # 6 páginas máx.
+        try:
+            resp = cli.get_users_tweets(
+                id=TWITTER_USER_ID,
+                max_results=100,
+                pagination_token=pagination_token,
+                tweet_fields=["created_at", "text"]
+            )
+        except tweepy.errors.TooManyRequests as e:
+            print("⚠️ Rate limit X (429) en get_users_tweets. Se desactiva anti-repetición hoy.")
+            return []
+        except Exception as e:
+            print("⚠️ Error consultando tuits anteriores:", e)
+            return []
+
+        if not resp.data:
+            break
+
+        for t in resp.data:
+            txt = t.text
+            if search_prefix in txt:
+                old_texts.append(txt.lower())
+
+        pagination_token = resp.meta.get("next_token")
+        if not pagination_token:
+            break
+
+    return old_texts
+
+
+def event_is_repeated(event_text, old_texts):
+    """
+    Comprueba si un evento ya fue tratado comparando tokens clave.
+    """
+    t = event_text.lower()
+
+    key_fragments = (
+        SPANISH_ACTOR_TOKENS +
+        SPANISH_WIDE_TOKENS +
+        MILITARY_KEYWORDS +
+        DIPLO_KEYWORDS
+    )
+
+    for prev in old_texts:
+        matches = 0
+        for k in key_fragments:
+            if k in t and k in prev:
+                matches += 1
+        if matches >= 2:
+            return True
+
+    return False
+
+
+# ----------------- NUEVO: detector de contradicciones ----------------- #
+
+def detect_and_fix_contradictions(headline, followups, event_text):
+    """
+    Detecta contradicciones internas usando modelo y reescribe los tuits conflictivos.
+    """
+    all_tweets = [headline] + followups
+
+    prompt = f"""
+Analiza estos tuits y detecta contradicciones internas en fechas, cifras, nombres, lugares o hechos:
+
+EFEMÉRIDE ORIGINAL:
+\"\"\"{event_text}\"\"\"
+
+TUITS DEL HILO:
+{json.dumps(all_tweets, ensure_ascii=False, indent=2)}
+
+Devuelve EXCLUSIVAMENTE un JSON con la siguiente forma:
+{{
+  "fixed": ["tuit1", "tuit2", "..."]
+}}
+No añadas nada más.
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "Corrige contradicciones internas respetando el estilo original."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        max_tokens=800
+    )
+
+    raw = resp.choices[0].message.content.strip()
+
+    try:
+        data = json.loads(raw)
+        fixed = data.get("fixed", [])
+        if isinstance(fixed, list) and len(fixed) == len(all_tweets):
+            return fixed[0], fixed[1:]
+    except Exception:
+        pass
+
+    return headline, followups
+
 
 # ----------------- Utilidades de fecha ----------------- #
 
@@ -238,18 +359,22 @@ def compute_score(ev):
     ev["has_foreign"] = has_foreign
 
 
-def choose_best_event(events):
+def choose_best_event(events, old_texts):
     """
-    Elige el evento con mayor score según compute_score.
-    Siempre devuelve algo si hay eventos.
+    Elige el evento con mayor score según compute_score, evitando repetidos.
     """
-    if not events:
-        return None
+    candidates = []
 
     for ev in events:
+        if event_is_repeated(ev["text"], old_texts):
+            continue
         compute_score(ev)
+        candidates.append(ev)
 
-    best = max(events, key=lambda e: e["score"])
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda e: e["score"])
     return best
 
 
@@ -271,7 +396,6 @@ Fecha de hoy: {today_str}.
 Efeméride seleccionada (año {event_year}) procedente de un listado de efemérides históricas:
 
 \"\"\"{event_text}\"\"\"
-
 
 Escribe UN SOLO tuit en español siguiendo EXACTAMENTE este formato general:
 
@@ -328,9 +452,7 @@ def generate_followup_tweets(today_year, today_month_name, today_day, event):
     - Sin fecha ni fórmula 'En tal día como hoy...'
     - Sin hashtags.
     - Sin emojis.
-    - Explican por qué ese hecho/f
-
-ue importante para España/Imperio, consecuencias, etc.
+    - Explican por qué ese hecho fue importante para España/Imperio, consecuencias, etc.
     Devuelve una lista de strings.
     """
     today_str = f"{today_day} de {today_month_name} de {today_year}"
@@ -342,7 +464,6 @@ Fecha de hoy: {today_str}.
 Efeméride seleccionada (año {event_year}):
 
 \"\"\"{event_text}\"\"\"
-
 
 Vas a escribir un HILO que continúa el tuit titular (que ya dice:
 "🇪🇸 {today_str}: En tal día como hoy del año {event_year}, ...").
@@ -484,10 +605,13 @@ def main():
         print("No hay eventos disponibles para hoy. No se publicará tuit.")
         return
 
-    # 2) Elegir el mejor evento según scoring
-    best = choose_best_event(events)
+    # NUEVO: cargar tuits antiguos de este día (para anti-repetición)
+    old_texts = fetch_previous_events_same_day(today_month, today_day)
+
+    # 2) Elegir el mejor evento según scoring y evitando repetidos
+    best = choose_best_event(events, old_texts)
     if not best:
-        print("No se ha podido seleccionar una efeméride adecuada. No se publicará tuit.")
+        print("No se ha podido seleccionar una efeméride adecuada (o todas repetidas). No se publicará tuit.")
         return
 
     print("Evento elegido:")
@@ -510,6 +634,11 @@ def main():
         print("❌ Error al generar el tuit titular con OpenAI:", e)
         return
 
+    # NUEVO: evitar publicar un tuit vacío
+    if not headline or not isinstance(headline, str) or len(headline.strip()) == 0:
+        print("❌ OpenAI devolvió un titular vacío o inválido. Abortando para evitar publicar un tuit en blanco.")
+        return
+
     print("Tuit titular generado:")
     print(headline)
     print(f"Largo: {len(headline)} caracteres")
@@ -524,6 +653,9 @@ def main():
     print(f"Se han generado {len(followups)} tuits adicionales para el hilo.")
     for i, t in enumerate(followups, start=2):
         print(f"[Tuit {i}] {t} (len={len(t)})")
+
+    # NUEVO: detector de contradicciones interno (titular + hilo)
+    headline, followups = detect_and_fix_contradictions(headline, followups, best["text"])
 
     # 5) Publicar hilo en X
     try:
