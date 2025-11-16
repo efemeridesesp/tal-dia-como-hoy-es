@@ -136,7 +136,7 @@ def fetch_previous_events_same_day(month, day):
                 pagination_token=pagination_token,
                 tweet_fields=["created_at", "text"]
             )
-        except tweepy.errors.TooManyRequests as e:
+        except tweepy.errors.TooManyRequests:
             print("⚠️ Rate limit X (429) en get_users_tweets. Se desactiva anti-repetición hoy.")
             return []
         except Exception as e:
@@ -297,6 +297,114 @@ def fetch_hoyenlahistoria_events():
     return events
 
 
+# ----------------- NUEVO: scraper de nuestrahistoria.es ----------------- #
+
+def fetch_nuestrahistoria_events_for_today(today_day, today_month_name):
+    """
+    Busca en nuestrahistoria.es/efemerides/ textos tipo
+    'Tal día como hoy, el X de mes de AAAA...' y devuelve eventos.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    events = []
+    month = today_month_name.lower()
+    day = today_day
+
+    # Revisamos primera página de efemérides (suele tener las más recientes)
+    urls = [
+        "https://nuestrahistoria.es/efemerides/",
+        "https://nuestrahistoria.es/efemerides/2/",
+    ]
+
+    pattern = re.compile(
+        rf"Tal día como hoy,\s*el\s+{day}\s+de\s+{month}[^\d]*(\d{{3,4}})(.*?)(?=Tal día como hoy, el|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=25)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"⚠️ Error accediendo a {url}:", e)
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        full_text = soup.get_text(" ", strip=True)
+
+        for m in pattern.finditer(full_text):
+            year_str = m.group(1)
+            try:
+                year = int(year_str)
+            except ValueError:
+                continue
+            snippet = m.group(0).strip()
+            events.append({
+                "year": year,
+                "text": snippet,
+                "raw": snippet,
+                "source": "nuestrahistoria",
+            })
+
+    return events
+
+
+# ----------------- NUEVO: scraper de espanaenlahistoria.org ----------------- #
+
+def fetch_espanaenlahistoria_events_for_today(today_day, today_month_name):
+    """
+    Busca en espanaenlahistoria.org/efemerides/ textos con fechas tipo
+    '(X mes AAAA)' y extrae los que coincidan con el día/mes actual.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    events = []
+    month = today_month_name.lower()
+    day = today_day
+
+    base = "https://espanaenlahistoria.org/efemerides/"
+    urls = [
+        base,
+        base + "page/2/",
+        base + "page/3/",
+    ]
+
+    pattern = re.compile(
+        rf"\({day}\s+{month}\s+(\d{{3,4}})\)",
+        re.IGNORECASE,
+    )
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=25)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"⚠️ Error accediendo a {url}:", e)
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        full_text = soup.get_text(" ", strip=True)
+
+        for m in pattern.finditer(full_text):
+            year_str = m.group(1)
+            try:
+                year = int(year_str)
+            except ValueError:
+                continue
+
+            # Cogemos una ventana de contexto alrededor de la fecha
+            start = max(0, m.start() - 200)
+            end = min(len(full_text), m.end() + 200)
+            snippet = full_text[start:end].strip()
+
+            events.append({
+                "year": year,
+                "text": snippet,
+                "raw": snippet,
+                "source": "espanaenlahistoria",
+            })
+
+    return events
+
+
 # ----------------- Scoring “imperial” con penalización a batallas guiris ----------------- #
 
 def compute_score(ev):
@@ -344,9 +452,6 @@ def compute_score(ev):
         score += 5
 
     # Penalización clave:
-    # Si es evento MILITAR, con actores claramente extranjeros,
-    # y España solo aparece de fondo (sin ser actor),
-    # lo hundimos para que no gane a una efeméride española normal.
     if has_military and has_foreign and not has_spanish_actor and not has_diplomatic:
         score -= 40
 
@@ -592,17 +697,33 @@ def main():
 
     print(f"Hoy es {today_day}/{today_month}/{today_year} ({today_month_name}).")
 
-    # 1) Obtener eventos de hoy en la web
+    # 1) Obtener eventos de hoy en la web (HOYENLAHISTORIA)
     try:
         events = fetch_hoyenlahistoria_events()
         print(f"Se han encontrado {len(events)} eventos en hoyenlahistoria.com")
     except Exception as e:
         print("❌ Error obteniendo eventos de hoyenlahistoria.com:", e)
-        print("No se publicará ningún tuit hoy.")
-        return
+        events = []
+
+    # NUEVO: sumar eventos de otras fuentes
+    try:
+        nh_events = fetch_nuestrahistoria_events_for_today(today_day, today_month_name)
+        print(f"Se han encontrado {len(nh_events)} eventos en nuestrahistoria.es")
+        events.extend(nh_events)
+    except Exception as e:
+        print("⚠️ Error obteniendo eventos de nuestrahistoria.es:", e)
+
+    try:
+        ee_events = fetch_espanaenlahistoria_events_for_today(today_day, today_month_name)
+        print(f"Se han encontrado {len(ee_events)} eventos en espanaenlahistoria.org")
+        events.extend(ee_events)
+    except Exception as e:
+        print("⚠️ Error obteniendo eventos de espanaenlahistoria.org:", e)
+
+    print(f"Total de eventos recopilados de todas las fuentes: {len(events)}")
 
     if not events:
-        print("No hay eventos disponibles para hoy. No se publicará tuit.")
+        print("No hay eventos disponibles para hoy en ninguna fuente. No se publicará tuit.")
         return
 
     # NUEVO: cargar tuits antiguos de este día (para anti-repetición)
