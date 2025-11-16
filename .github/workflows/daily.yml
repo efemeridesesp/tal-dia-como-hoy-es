@@ -2,10 +2,10 @@ name: Bot de Efemérides
 
 on:
   schedule:
-    # Lunes a viernes - 06:30 UTC (07:30 CET)
-    - cron: '30 6 * * 1-5'
-    # Sábados y domingos - 08:00 UTC (09:00 CET)
-    - cron: '0 8 * * 6,0'
+    # Lunes a viernes - 09:30 UTC (10:30 CET / 11:30 CEST aprox)
+    - cron: '30 9 * * 1-5'
+    # Sábados y domingos - 10:30 UTC (11:30 CET / 12:30 CEST aprox)
+    - cron: '30 10 * * 6,0'
 
   workflow_dispatch:
 
