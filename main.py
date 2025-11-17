@@ -110,6 +110,56 @@ client = OpenAI()
 # ID numérico de tu cuenta
 TWITTER_USER_ID = "1988838626760032256"
 
+# Fichero para almacenar hilos pendientes por 429
+PENDING_FILE = "pending_tweet.json"
+
+
+# ----------------- Gestión de hilos pendientes ----------------- #
+
+def load_pending_tweet():
+    """Carga un hilo pendiente del fichero JSON, si existe y es válido."""
+    if not os.path.exists(PENDING_FILE):
+        return None
+    try:
+        with open(PENDING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        headline = data.get("headline")
+        followups = data.get("followups", [])
+        if not isinstance(headline, str) or not headline.strip():
+            return None
+        if not isinstance(followups, list):
+            followups = []
+        followups = [str(t) for t in followups]
+        return {"headline": headline, "followups": followups}
+    except Exception as e:
+        print("⚠️ Error leyendo pending_tweet.json:", e)
+        return None
+
+
+def save_pending_tweet(headline, followups):
+    """Guarda un hilo pendiente en el fichero JSON."""
+    try:
+        data = {
+            "headline": headline,
+            "followups": list(followups or []),
+            "saved_at": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        with open(PENDING_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print("💾 Hilo guardado en pending_tweet.json para publicar más adelante.")
+    except Exception as e:
+        print("⚠️ No se pudo guardar el hilo pendiente:", e)
+
+
+def clear_pending_tweet():
+    """Elimina el fichero de hilo pendiente si existe."""
+    try:
+        if os.path.exists(PENDING_FILE):
+            os.remove(PENDING_FILE)
+            print("🧹 pending_tweet.json eliminado tras publicar el hilo pendiente.")
+    except Exception as e:
+        print("⚠️ No se pudo eliminar pending_tweet.json:", e)
+
 
 # ----------------- Anti-repetición (timeline X) ----------------- #
 
@@ -756,6 +806,22 @@ def main():
 
     print(f"Hoy es {today_day}/{today_month}/{today_year} ({today_month_name}).")
 
+    # 0) Si hay un hilo pendiente de días anteriores, intentamos publicarlo primero
+    pending = load_pending_tweet()
+    if pending:
+        print("📨 Hay un hilo pendiente en pending_tweet.json. Intentando publicarlo primero...")
+        try:
+            post_thread(pending["headline"], pending.get("followups", []))
+            print("✅ Hilo pendiente publicado correctamente.")
+            clear_pending_tweet()
+        except tweepy.errors.TooManyRequests:
+            print("❌ Rate limit 429 al publicar el hilo pendiente. Se mantiene en cola y se aborta hoy.")
+            return
+        except Exception as e:
+            print("❌ Error publicando el hilo pendiente:", e)
+            print("Se mantiene en cola y se aborta hoy para no perderlo.")
+            return
+
     # 1) Fuente principal: OpenAI genera efemérides del día
     try:
         events = fetch_openai_events_for_today(today_year, today_month, today_day, today_month_name)
@@ -823,6 +889,11 @@ def main():
     try:
         post_thread(headline, followups)
         print("✅ Hilo publicado correctamente.")
+    except tweepy.errors.TooManyRequests:
+        print("⚠️ 429 Too Many Requests al publicar el hilo de hoy. Se guarda como pendiente.")
+        save_pending_tweet(headline, followups)
+        # No hacemos raise: consideramos ejecución correcta, solo diferida.
+        return
     except Exception as e:
         print("❌ Error publicando el hilo en Twitter/X:", e)
         raise
