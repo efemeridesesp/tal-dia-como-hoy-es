@@ -114,6 +114,52 @@ TWITTER_USER_ID = "1988838626760032256"
 PENDING_FILE = "pending_tweet.json"
 
 
+# ----------------- Helper para limpiar JSON con ```json ... ``` ----------------- #
+
+def clean_json_from_markdown(raw: str) -> str:
+    """
+    Limpia posibles fences de Markdown tipo ```json ... ``` o ``` ... ``` y
+    recorta todo lo que haya antes del primer '{' o '[' y después del último '}' o ']'.
+    Deja solo el bloque JSON parseable.
+    """
+    if not isinstance(raw, str):
+        raw = str(raw)
+
+    s = raw.strip()
+
+    # Si empieza con ``` algo, quitamos la primera línea y la última si también es ```
+    if s.startswith("```"):
+        lines = s.splitlines()
+        # quitar la primera línea (``` o ```json)
+        if lines:
+            lines = lines[1:]
+        # quitar la última si es ``` o ```algo
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+
+    # Buscar el primer '{' o '['
+    first_brace = s.find("{")
+    first_bracket = s.find("[")
+    candidates = [i for i in (first_brace, first_bracket) if i != -1]
+    if candidates:
+        start = min(candidates)
+        s = s[start:]
+    else:
+        # No hay ni { ni [, devolvemos tal cual (dejará fallar a json.loads)
+        return s
+
+    # Buscar el último '}' o ']'
+    last_brace = s.rfind("}")
+    last_bracket = s.rfind("]")
+    candidates_end = [i for i in (last_brace, last_bracket) if i != -1]
+    if candidates_end:
+        end = max(candidates_end) + 1
+        s = s[:end]
+
+    return s.strip()
+
+
 # ----------------- Gestión de hilos pendientes ----------------- #
 
 def load_pending_tweet():
@@ -263,14 +309,17 @@ No añadas nada más.
     )
 
     raw = resp.choices[0].message.content.strip()
+    raw_clean = clean_json_from_markdown(raw)
 
     try:
-        data = json.loads(raw)
+        data = json.loads(raw_clean)
         fixed = data.get("fixed", [])
         if isinstance(fixed, list) and len(fixed) == len(all_tweets):
             return fixed[0], fixed[1:]
     except Exception:
-        pass
+        print("⚠️ No se ha podido parsear el JSON de corrección de contradicciones.")
+        print("Contenido bruto devuelto por OpenAI:")
+        print(raw)
 
     return headline, followups
 
@@ -490,17 +539,28 @@ No añadas comentarios fuera del JSON.
     )
 
     raw = completion.choices[0].message.content.strip()
+    raw_clean = clean_json_from_markdown(raw)
 
     events = []
     try:
-        data = json.loads(raw)
-        items = data.get("events", [])
+        data = json.loads(raw_clean)
+
+        # Puede venir como {"events":[...]} o como lista directa [...]
+        if isinstance(data, dict):
+            items = data.get("events", [])
+        else:
+            items = data
+
         if isinstance(items, list):
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 year = item.get("year")
-                desc = item.get("description") or item.get("texto") or item.get("text")
+                desc = (
+                    item.get("description")
+                    or item.get("texto")
+                    or item.get("text")
+                )
                 try:
                     year_int = int(year)
                 except (TypeError, ValueError):
@@ -520,7 +580,6 @@ No añadas comentarios fuera del JSON.
         print("⚠️ No se ha podido parsear el JSON de efemérides desde OpenAI:", e)
         print("Contenido bruto devuelto por OpenAI:")
         print(raw)
-        events = []
 
     return events
 
@@ -712,21 +771,40 @@ FORMATO DE RESPUESTA:
     )
 
     raw = completion.choices[0].message.content.strip()
+    raw_clean = clean_json_from_markdown(raw)
 
     tweets = []
     try:
-        data = json.loads(raw)
+        data = json.loads(raw_clean)
+
+        # Puede venir como lista directa ["...", "..."]
+        # o como {"tweets":[...]} o similar
         if isinstance(data, list):
             items = data
+        elif isinstance(data, dict):
+            # buscamos una clave razonable
+            if "tweets" in data and isinstance(data["tweets"], list):
+                items = data["tweets"]
+            elif "hilo" in data and isinstance(data["hilo"], list):
+                items = data["hilo"]
+            else:
+                # Intentar coger el primer valor que sea lista
+                listas = [v for v in data.values() if isinstance(v, list)]
+                items = listas[0] if listas else []
         else:
-            items = data  # por si devuelve directamente lista
+            items = []
 
         if isinstance(items, list):
             for item in items:
                 if isinstance(item, str):
                     text = item.strip()
                 elif isinstance(item, dict):
-                    text = str(item.get("text", "")).strip()
+                    text = str(
+                        item.get("text")
+                        or item.get("contenido")
+                        or item.get("description")
+                        or ""
+                    ).strip()
                 else:
                     continue
 
@@ -892,7 +970,6 @@ def main():
     except tweepy.errors.TooManyRequests:
         print("⚠️ 429 Too Many Requests al publicar el hilo de hoy. Se guarda como pendiente.")
         save_pending_tweet(headline, followups)
-        # No hacemos raise: consideramos ejecución correcta, solo diferida.
         return
     except Exception as e:
         print("❌ Error publicando el hilo en Twitter/X:", e)
