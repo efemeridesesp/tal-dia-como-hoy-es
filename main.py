@@ -177,7 +177,7 @@ def load_pending_tweet():
         if not isinstance(followups, list):
             followups = []
         followups = [str(t) for t in followups]
-        if target_ddmm is not None and not isinstance(target_ddmm, str):
+        if not isinstance(target_ddmm, str):
             target_ddmm = None
         return {"headline": headline, "followups": followups, "target_ddmm": target_ddmm}
     except Exception as e:
@@ -956,6 +956,23 @@ def post_thread(headline, followups):
             break
 
 
+def try_publish_pending_thread(pending):
+    """Intenta publicar un hilo pendiente. Devuelve True si se publicó o False si se mantiene."""
+    print("📨 Hay un hilo pendiente en pending_tweet.json. Intentando publicarlo primero...")
+    try:
+        post_thread(pending["headline"], pending.get("followups", []))
+        print("✅ Hilo pendiente publicado correctamente.")
+        clear_pending_tweet()
+        return True
+    except tweepy.errors.TooManyRequests:
+        print("❌ Rate limit 429 al publicar el hilo pendiente. Se mantiene en cola y se aborta hoy.")
+        return False
+    except Exception as e:
+        print("❌ Error publicando el hilo pendiente:", e)
+        print("Se mantiene en cola y se aborta hoy para no perderlo.")
+        return False
+
+
 # ----------------- Main ----------------- #
 
 def main():
@@ -974,17 +991,7 @@ def main():
                 "No se publicará para evitar errores de dd/mm."
             )
         else:
-            print("📨 Hay un hilo pendiente en pending_tweet.json. Intentando publicarlo primero...")
-            try:
-                post_thread(pending["headline"], pending.get("followups", []))
-                print("✅ Hilo pendiente publicado correctamente.")
-                clear_pending_tweet()
-            except tweepy.errors.TooManyRequests:
-                print("❌ Rate limit 429 al publicar el hilo pendiente. Se mantiene en cola y se aborta hoy.")
-                return
-            except Exception as e:
-                print("❌ Error publicando el hilo pendiente:", e)
-                print("Se mantiene en cola y se aborta hoy para no perderlo.")
+            if not try_publish_pending_thread(pending):
                 return
 
     # 1) Fuente principal: OpenAI genera efemérides del día
