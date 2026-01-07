@@ -171,23 +171,27 @@ def load_pending_tweet():
             data = json.load(f)
         headline = data.get("headline")
         followups = data.get("followups", [])
+        target_ddmm = data.get("target_ddmm")
         if not isinstance(headline, str) or not headline.strip():
             return None
         if not isinstance(followups, list):
             followups = []
         followups = [str(t) for t in followups]
-        return {"headline": headline, "followups": followups}
+        if not isinstance(target_ddmm, str):
+            target_ddmm = None
+        return {"headline": headline, "followups": followups, "target_ddmm": target_ddmm}
     except Exception as e:
         print("⚠️ Error leyendo pending_tweet.json:", e)
         return None
 
 
-def save_pending_tweet(headline, followups):
+def save_pending_tweet(headline, followups, target_ddmm):
     """Guarda un hilo pendiente en el fichero JSON."""
     try:
         data = {
             "headline": headline,
             "followups": list(followups or []),
+            "target_ddmm": target_ddmm,
             "saved_at": datetime.datetime.utcnow().isoformat() + "Z",
         }
         with open(PENDING_FILE, "w", encoding="utf-8") as f:
@@ -654,6 +658,81 @@ def choose_best_event(events, old_texts):
     return best
 
 
+def verify_event_for_today(today_day, today_month_name, event_text):
+    """
+    Verifica con OpenAI que el evento ocurrió exactamente el dd/mm de hoy y sin ambigüedad.
+    Devuelve (bool, reason).
+    """
+    today_str = f"{today_day} de {today_month_name}"
+
+    prompt = f"""
+Fecha objetivo: {today_str}.
+Evento candidato: \"\"\"{event_text}\"\"\".
+
+Devuelve EXCLUSIVAMENTE un JSON con la forma:
+{{"valid": true/false, "reason": "explicación breve"}}
+
+Criterios estrictos:
+- Solo valid si el evento ocurrió EXACTAMENTE el {today_str}.
+- Si la fecha es incierta, aproximada, ambigua o hay varias fechas posibles → valid=false.
+- Si no puedes afirmar con certeza absoluta → valid=false.
+- Responde en español.
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "Eres un verificador histórico estricto. Solo validas fechas exactas."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,
+        max_tokens=200,
+    )
+
+    raw = resp.choices[0].message.content.strip()
+    raw_clean = clean_json_from_markdown(raw)
+
+    try:
+        data = json.loads(raw_clean)
+        valid = bool(data.get("valid"))
+        reason = data.get("reason") or ""
+        return valid, str(reason).strip()
+    except Exception:
+        print("⚠️ No se ha podido parsear el JSON de verificación histórica.")
+        print("Contenido bruto devuelto por OpenAI:")
+        print(raw)
+        return False, "Respuesta inválida del verificador"
+
+
+def choose_best_verified_event(events, old_texts, today_day, today_month_name):
+    """
+    Elige el mejor evento por score y lo verifica con OpenAI.
+    Si no pasa verificación, prueba el siguiente.
+    """
+    candidates = []
+
+    for ev in events:
+        if event_is_repeated(ev["text"], old_texts):
+            continue
+        compute_score(ev)
+        candidates.append(ev)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda e: e["score"], reverse=True)
+
+    for ev in candidates:
+        valid, reason = verify_event_for_today(today_day, today_month_name, ev["text"])
+        if valid:
+            return ev
+        print(f"⚠️ Evento descartado por verificación: {ev['text']}")
+        if reason:
+            print(f"   Motivo: {reason}")
+
+    return None
+
+
 # ----------------- Generación de TEXTO con OpenAI ----------------- #
 
 def generate_headline_tweet(today_year, today_month_name, today_day, event):
@@ -877,28 +956,43 @@ def post_thread(headline, followups):
             break
 
 
+def try_publish_pending_thread(pending):
+    """Intenta publicar un hilo pendiente. Devuelve True si se publicó o False si se mantiene."""
+    print("📨 Hay un hilo pendiente en pending_tweet.json. Intentando publicarlo primero...")
+    try:
+        post_thread(pending["headline"], pending.get("followups", []))
+        print("✅ Hilo pendiente publicado correctamente.")
+        clear_pending_tweet()
+        return True
+    except tweepy.errors.TooManyRequests:
+        print("❌ Rate limit 429 al publicar el hilo pendiente. Se mantiene en cola y se aborta hoy.")
+        return False
+    except Exception as e:
+        print("❌ Error publicando el hilo pendiente:", e)
+        print("Se mantiene en cola y se aborta hoy para no perderlo.")
+        return False
+
+
 # ----------------- Main ----------------- #
 
 def main():
     today_year, today_month, today_day, today_month_name = today_info()
+    today_ddmm = f"{today_day:02d}/{today_month:02d}"
 
     print(f"Hoy es {today_day}/{today_month}/{today_year} ({today_month_name}).")
 
     # 0) Si hay un hilo pendiente de días anteriores, intentamos publicarlo primero
     pending = load_pending_tweet()
     if pending:
-        print("📨 Hay un hilo pendiente en pending_tweet.json. Intentando publicarlo primero...")
-        try:
-            post_thread(pending["headline"], pending.get("followups", []))
-            print("✅ Hilo pendiente publicado correctamente.")
-            clear_pending_tweet()
-        except tweepy.errors.TooManyRequests:
-            print("❌ Rate limit 429 al publicar el hilo pendiente. Se mantiene en cola y se aborta hoy.")
-            return
-        except Exception as e:
-            print("❌ Error publicando el hilo pendiente:", e)
-            print("Se mantiene en cola y se aborta hoy para no perderlo.")
-            return
+        pending_ddmm = pending.get("target_ddmm")
+        if pending_ddmm != today_ddmm:
+            print(
+                "⚠️ Hay un hilo pendiente, pero su fecha objetivo no coincide con hoy. "
+                "No se publicará para evitar errores de dd/mm."
+            )
+        else:
+            if not try_publish_pending_thread(pending):
+                return
 
     # 1) Fuente principal: OpenAI genera efemérides del día
     try:
@@ -916,9 +1010,9 @@ def main():
     old_texts = fetch_previous_events_same_day(today_month, today_day)
 
     # 3) Elegir el mejor evento según scoring y evitando repetidos
-    best = choose_best_event(events, old_texts)
+    best = choose_best_verified_event(events, old_texts, today_day, today_month_name)
     if not best:
-        print("No se ha podido seleccionar una efeméride adecuada (o todas repetidas). No se publicará tuit.")
+        print("No se ha podido seleccionar una efeméride válida tras verificación. No se publicará tuit.")
         return
 
     print("Evento elegido:")
@@ -969,7 +1063,7 @@ def main():
         print("✅ Hilo publicado correctamente.")
     except tweepy.errors.TooManyRequests:
         print("⚠️ 429 Too Many Requests al publicar el hilo de hoy. Se guarda como pendiente.")
-        save_pending_tweet(headline, followups)
+        save_pending_tweet(headline, followups, today_ddmm)
         return
     except Exception as e:
         print("❌ Error publicando el hilo en Twitter/X:", e)
