@@ -841,26 +841,31 @@ def choose_best_event(events, old_texts):
 
 def choose_best_verified_event(events, old_texts, today_ddmm):
     """
-    Elige el mejor evento por score y lo valida con Wikidata.
+    Elige el mejor evento por score y lo valida con Wikidata,
+    siguiendo el orden editorial de tipos: event → birth → death.
     Si no pasa validación, prueba el siguiente.
     """
-    candidates = []
+    type_order = ("event", "birth", "death")
 
-    for ev in events:
-        if event_is_repeated(ev["text"], old_texts):
+    for cand_type in type_order:
+        candidates = []
+        for ev in events:
+            if ev.get("type") != cand_type:
+                continue
+            if event_is_repeated(ev["text"], old_texts):
+                continue
+            compute_score(ev)
+            candidates.append(ev)
+
+        if not candidates:
             continue
-        compute_score(ev)
-        candidates.append(ev)
 
-    if not candidates:
-        return None
+        candidates.sort(key=lambda e: e["score"], reverse=True)
 
-    candidates.sort(key=lambda e: e["score"], reverse=True)
-
-    for ev in candidates:
-        if validate_candidate_with_wikidata(ev, today_ddmm):
-            return ev
-        print(f"⚠️ Evento descartado por Wikidata: {ev['text']}")
+        for ev in candidates:
+            if validate_candidate_with_wikidata(ev, today_ddmm):
+                return ev
+            print(f"⚠️ Evento descartado por Wikidata: {ev['text']}")
 
     return None
 
@@ -1126,23 +1131,36 @@ def main():
             if not try_publish_pending_thread(pending):
                 return
 
-    # 1) Fuente principal: OpenAI genera efemérides del día
-    try:
-        events = fetch_openai_events_for_today(today_year, today_month, today_day, today_month_name)
-        print(f"Se han generado {len(events)} efemérides desde OpenAI para {today_day}/{today_month}/{today_year}.")
-    except Exception as e:
-        print("❌ Error generando efemérides desde OpenAI:", e)
-        events = []
-
-    if not events:
-        print("No hay eventos generados para hoy. No se publicará tuit.")
-        return
-
-    # 2) Anti-repetición basándose en tu timeline reciente
+    # 1) Anti-repetición basándose en tu timeline reciente
     old_texts = fetch_previous_events_same_day(today_month, today_day)
 
-    # 3) Elegir el mejor evento según scoring y evitando repetidos
-    best = choose_best_verified_event(events, old_texts, today_ddmm)
+    # 2) Fuente principal: OpenAI genera efemérides del día (con múltiples rondas)
+    try:
+        attempts = int(os.getenv("OPENAI_GENERATION_ATTEMPTS", "2"))
+    except ValueError:
+        attempts = 2
+    attempts = max(1, attempts)
+    best = None
+    for attempt in range(1, attempts + 1):
+        try:
+            events = fetch_openai_events_for_today(today_year, today_month, today_day, today_month_name)
+            print(
+                f"Ronda {attempt}/{attempts}: "
+                f"se han generado {len(events)} efemérides desde OpenAI para "
+                f"{today_day}/{today_month}/{today_year}."
+            )
+        except Exception as e:
+            print(f"❌ Error generando efemérides desde OpenAI (ronda {attempt}):", e)
+            events = []
+
+        if not events:
+            continue
+
+        best = choose_best_verified_event(events, old_texts, today_ddmm)
+        if best:
+            break
+
+    # 3) Elegir el mejor evento según orden editorial y validación
     if not best:
         print("No se ha podido seleccionar una efeméride válida tras verificación. No se publicará tuit.")
         return
