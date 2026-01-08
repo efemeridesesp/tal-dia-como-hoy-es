@@ -103,6 +103,7 @@ TW_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
 TW_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 USER_AGENT = "Efemerides_Imp_Bot/1.0 (https://github.com/efemeridesesp/tal-dia-como-hoy-es)"
+WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
 
 # Cliente de OpenAI (usa OPENAI_API_KEY del entorno)
 client = OpenAI()
@@ -158,6 +159,174 @@ def clean_json_from_markdown(raw: str) -> str:
         s = s[:end]
 
     return s.strip()
+
+
+# ----------------- Wikidata (validación determinista de fechas) ----------------- #
+
+def search_entity_id(label: str):
+    """
+    Busca un QID en Wikidata a partir de un label en español.
+    """
+    if not label:
+        return None
+
+    params = {
+        "action": "wbsearchentities",
+        "search": label,
+        "language": "es",
+        "format": "json",
+        "limit": 1,
+    }
+
+    try:
+        resp = requests.get(WIKIDATA_API_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"⚠️ Error buscando entidad Wikidata para '{label}': {exc}")
+        return None
+
+    results = data.get("search", [])
+    if not results:
+        return None
+
+    return results[0].get("id")
+
+
+def _extract_time_values(claims, prop):
+    times = []
+    for claim in claims.get(prop, []):
+        mainsnak = claim.get("mainsnak", {})
+        datavalue = mainsnak.get("datavalue")
+        if not datavalue:
+            continue
+        value = datavalue.get("value", {})
+        time_str = value.get("time")
+        if time_str:
+            times.append(time_str)
+    return times
+
+
+def fetch_dates_for_qid(qid: str):
+    """
+    Devuelve un dict con posibles fechas a partir de claims de Wikidata.
+    """
+    if not qid:
+        return {}
+
+    params = {
+        "action": "wbgetentities",
+        "ids": qid,
+        "props": "claims",
+        "format": "json",
+    }
+
+    try:
+        resp = requests.get(WIKIDATA_API_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"⚠️ Error consultando Wikidata para {qid}: {exc}")
+        return {}
+
+    entity = data.get("entities", {}).get(qid, {})
+    claims = entity.get("claims", {})
+
+    return {
+        "P585": _extract_time_values(claims, "P585"),
+        "P580": _extract_time_values(claims, "P580"),
+        "P582": _extract_time_values(claims, "P582"),
+        "P569": _extract_time_values(claims, "P569"),
+        "P570": _extract_time_values(claims, "P570"),
+    }
+
+
+def normalize_ddmm(wikidata_time_str):
+    """
+    Convierte un time string de Wikidata a DD/MM o None si no es válido.
+    """
+    if not wikidata_time_str:
+        return None
+
+    match = re.match(r"^[+-]?\d{4,}-(\d{2})-(\d{2})", wikidata_time_str)
+    if not match:
+        return None
+
+    month, day = match.groups()
+    if month == "00" or day == "00":
+        return None
+
+    return f"{day}/{month}"
+
+
+def _pick_unique_ddmm(time_values):
+    ddmms = []
+    for time_value in time_values:
+        ddmm = normalize_ddmm(time_value)
+        if ddmm:
+            ddmms.append(ddmm)
+
+    unique = sorted(set(ddmms))
+    if not unique:
+        return None, "sin fecha exacta en Wikidata"
+    if len(unique) > 1:
+        return None, "ambigüedad de fechas en Wikidata"
+    return unique[0], None
+
+
+def validate_candidate_with_wikidata(candidate, today_ddmm):
+    """
+    Valida la fecha con Wikidata. Devuelve True si coincide con today_ddmm.
+    """
+    entity = candidate.get("entity")
+    cand_type = candidate.get("type")
+    print(f"🔍 Wikidata: validando '{entity}' ({cand_type})")
+
+    qid = search_entity_id(entity)
+    if not qid:
+        print("   -> Sin QID encontrado. Descartado.")
+        return False
+
+    dates = fetch_dates_for_qid(qid)
+
+    if cand_type == "event":
+        for prop in ("P585", "P580", "P582"):
+            ddmm, reason = _pick_unique_ddmm(dates.get(prop, []))
+            print(f"   -> {prop} ddmm: {ddmm}")
+            if ddmm is None:
+                if reason == "ambigüedad de fechas en Wikidata":
+                    print(f"   -> Descartado: {reason}.")
+                    return False
+                continue
+            if ddmm == today_ddmm:
+                print("   -> Fecha coincide. Válido.")
+                return True
+            print("   -> Fecha no coincide. Descartado.")
+            return False
+
+        print("   -> Sin fecha exacta. Descartado.")
+        return False
+
+    if cand_type == "birth":
+        ddmm, reason = _pick_unique_ddmm(dates.get("P569", []))
+        print(f"   -> P569 ddmm: {ddmm}")
+        if ddmm == today_ddmm:
+            print("   -> Fecha coincide. Válido.")
+            return True
+        print(f"   -> Descartado: {reason or 'fecha no coincide'}.")
+        return False
+
+    if cand_type == "death":
+        ddmm, reason = _pick_unique_ddmm(dates.get("P570", []))
+        print(f"   -> P570 ddmm: {ddmm}")
+        if ddmm == today_ddmm:
+            print("   -> Fecha coincide. Válido.")
+            return True
+        print(f"   -> Descartado: {reason or 'fecha no coincide'}.")
+        return False
+
+    print("   -> Tipo desconocido. Descartado.")
+    return False
 
 
 # ----------------- Gestión de hilos pendientes ----------------- #
@@ -508,17 +677,21 @@ Condiciones:
 - Redacta todo en español.
 
 FORMATO DE RESPUESTA (OBLIGATORIO):
-Devuelve EXCLUSIVAMENTE un JSON con esta estructura:
+    Devuelve EXCLUSIVAMENTE un JSON con esta estructura:
 
 {{
   "events": [
     {{
       "year": 1580,
-      "description": "texto breve describiendo la efeméride..."
+      "type": "event",
+      "entity": "Tratado de Lisboa",
+      "text": "texto breve describiendo la efeméride..."
     }},
     {{
       "year": 1643,
-      "description": "..."
+      "type": "birth",
+      "entity": "Carlos II de España",
+      "text": "..."
     }}
   ]
 }}
@@ -560,10 +733,12 @@ No añadas comentarios fuera del JSON.
                 if not isinstance(item, dict):
                     continue
                 year = item.get("year")
+                cand_type = item.get("type")
+                entity = item.get("entity")
                 desc = (
-                    item.get("description")
+                    item.get("text")
+                    or item.get("description")
                     or item.get("texto")
-                    or item.get("text")
                 )
                 try:
                     year_int = int(year)
@@ -571,11 +746,17 @@ No añadas comentarios fuera del JSON.
                     continue
                 if not isinstance(desc, str):
                     continue
+                if cand_type not in {"event", "birth", "death"}:
+                    continue
+                if not isinstance(entity, str) or not entity.strip():
+                    continue
                 desc = desc.strip()
                 if not desc:
                     continue
                 events.append({
                     "year": year_int,
+                    "type": cand_type,
+                    "entity": entity.strip(),
                     "text": desc,
                     "raw": desc,
                     "source": "openai",
@@ -658,56 +839,10 @@ def choose_best_event(events, old_texts):
     return best
 
 
-def verify_event_for_today(today_day, today_month_name, event_text):
+def choose_best_verified_event(events, old_texts, today_ddmm):
     """
-    Verifica con OpenAI que el evento ocurrió exactamente el dd/mm de hoy y sin ambigüedad.
-    Devuelve (bool, reason).
-    """
-    today_str = f"{today_day} de {today_month_name}"
-
-    prompt = f"""
-Fecha objetivo: {today_str}.
-Evento candidato: \"\"\"{event_text}\"\"\".
-
-Devuelve EXCLUSIVAMENTE un JSON con la forma:
-{{"valid": true/false, "reason": "explicación breve"}}
-
-Criterios estrictos:
-- Solo valid si el evento ocurrió EXACTAMENTE el {today_str}.
-- Si la fecha es incierta, aproximada, ambigua o hay varias fechas posibles → valid=false.
-- Si no puedes afirmar con certeza absoluta → valid=false.
-- Responde en español.
-"""
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "Eres un verificador histórico estricto. Solo validas fechas exactas."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-        max_tokens=200,
-    )
-
-    raw = resp.choices[0].message.content.strip()
-    raw_clean = clean_json_from_markdown(raw)
-
-    try:
-        data = json.loads(raw_clean)
-        valid = bool(data.get("valid"))
-        reason = data.get("reason") or ""
-        return valid, str(reason).strip()
-    except Exception:
-        print("⚠️ No se ha podido parsear el JSON de verificación histórica.")
-        print("Contenido bruto devuelto por OpenAI:")
-        print(raw)
-        return False, "Respuesta inválida del verificador"
-
-
-def choose_best_verified_event(events, old_texts, today_day, today_month_name):
-    """
-    Elige el mejor evento por score y lo verifica con OpenAI.
-    Si no pasa verificación, prueba el siguiente.
+    Elige el mejor evento por score y lo valida con Wikidata.
+    Si no pasa validación, prueba el siguiente.
     """
     candidates = []
 
@@ -723,12 +858,9 @@ def choose_best_verified_event(events, old_texts, today_day, today_month_name):
     candidates.sort(key=lambda e: e["score"], reverse=True)
 
     for ev in candidates:
-        valid, reason = verify_event_for_today(today_day, today_month_name, ev["text"])
-        if valid:
+        if validate_candidate_with_wikidata(ev, today_ddmm):
             return ev
-        print(f"⚠️ Evento descartado por verificación: {ev['text']}")
-        if reason:
-            print(f"   Motivo: {reason}")
+        print(f"⚠️ Evento descartado por Wikidata: {ev['text']}")
 
     return None
 
@@ -1010,13 +1142,15 @@ def main():
     old_texts = fetch_previous_events_same_day(today_month, today_day)
 
     # 3) Elegir el mejor evento según scoring y evitando repetidos
-    best = choose_best_verified_event(events, old_texts, today_day, today_month_name)
+    best = choose_best_verified_event(events, old_texts, today_ddmm)
     if not best:
         print("No se ha podido seleccionar una efeméride válida tras verificación. No se publicará tuit.")
         return
 
     print("Evento elegido:")
     print(f"- Año: {best['year']}")
+    print(f"- Tipo: {best['type']}")
+    print(f"- Entidad: {best['entity']}")
     print(f"- Texto: {best['text']}")
     print(f"- Score: {best.get('score', 'N/A')}")
     print(
@@ -1070,5 +1204,23 @@ def main():
         raise
 
 
+def run_wikidata_validation_smoke_test():
+    """
+    Smoke test manual: Felipe III de España NO coincide con 07/01.
+    """
+    candidate = {
+        "type": "death",
+        "entity": "Felipe III de España",
+        "year": 1621,
+        "text": "Fallecimiento de Felipe III de España.",
+    }
+    today_ddmm = "07/01"
+    is_valid = validate_candidate_with_wikidata(candidate, today_ddmm)
+    print(f"Resultado test Felipe III (death) vs {today_ddmm}: {is_valid}")
+
+
 if __name__ == "__main__":
-    main()
+    if os.getenv("RUN_WIKIDATA_TEST") == "1":
+        run_wikidata_validation_smoke_test()
+    else:
+        main()
