@@ -120,8 +120,7 @@ PENDING_FILE = "pending_tweet.json"
 def clean_json_from_markdown(raw: str) -> str:
     """
     Limpia posibles fences de Markdown tipo ```json ... ``` o ``` ... ``` y
-    recorta todo lo que haya antes del primer '{' o '[' y después del último '}' o ']'.
-    Deja solo el bloque JSON parseable.
+    extrae el primer objeto JSON completo entre el primer '{' y el último '}'.
     """
     if not isinstance(raw, str):
         raw = str(raw)
@@ -131,34 +130,18 @@ def clean_json_from_markdown(raw: str) -> str:
     # Si empieza con ``` algo, quitamos la primera línea y la última si también es ```
     if s.startswith("```"):
         lines = s.splitlines()
-        # quitar la primera línea (``` o ```json)
         if lines:
             lines = lines[1:]
-        # quitar la última si es ``` o ```algo
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         s = "\n".join(lines).strip()
 
-    # Buscar el primer '{' o '['
     first_brace = s.find("{")
-    first_bracket = s.find("[")
-    candidates = [i for i in (first_brace, first_bracket) if i != -1]
-    if candidates:
-        start = min(candidates)
-        s = s[start:]
-    else:
-        # No hay ni { ni [, devolvemos tal cual (dejará fallar a json.loads)
-        return s
-
-    # Buscar el último '}' o ']'
     last_brace = s.rfind("}")
-    last_bracket = s.rfind("]")
-    candidates_end = [i for i in (last_brace, last_bracket) if i != -1]
-    if candidates_end:
-        end = max(candidates_end) + 1
-        s = s[:end]
+    if first_brace == -1 or last_brace == -1 or last_brace <= first_brace:
+        raise ValueError("no se encontró un objeto JSON válido entre '{' y '}'")
 
-    return s.strip()
+    return s[first_brace:last_brace + 1].strip()
 
 
 # ----------------- Wikidata (validación determinista de fechas) ----------------- #
@@ -478,19 +461,19 @@ No añadas nada más.
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
-        max_tokens=800
+        max_tokens=800,
+        response_format={"type": "json_object"},
     )
 
     raw = resp.choices[0].message.content.strip()
-    raw_clean = clean_json_from_markdown(raw)
-
     try:
+        raw_clean = clean_json_from_markdown(raw)
         data = json.loads(raw_clean)
         fixed = data.get("fixed", [])
         if isinstance(fixed, list) and len(fixed) == len(all_tweets):
             return fixed[0], fixed[1:]
-    except Exception:
-        print("⚠️ No se ha podido parsear el JSON de corrección de contradicciones.")
+    except Exception as e:
+        print(f"⚠️ No se ha podido parsear el JSON de corrección de contradicciones: {e}")
         print("Contenido bruto devuelto por OpenAI:")
         print(raw)
 
@@ -713,13 +696,14 @@ No añadas comentarios fuera del JSON.
         ],
         temperature=0.5,
         max_tokens=1200,
+        response_format={"type": "json_object"},
     )
 
     raw = completion.choices[0].message.content.strip()
-    raw_clean = clean_json_from_markdown(raw)
 
     events = []
     try:
+        raw_clean = clean_json_from_markdown(raw)
         data = json.loads(raw_clean)
 
         # Puede venir como {"events":[...]} o como lista directa [...]
@@ -762,7 +746,7 @@ No añadas comentarios fuera del JSON.
                     "source": "openai",
                 })
     except Exception as e:
-        print("⚠️ No se ha podido parsear el JSON de efemérides desde OpenAI:", e)
+        print(f"⚠️ No se ha podido parsear el JSON de efemérides desde OpenAI: {e}")
         print("Contenido bruto devuelto por OpenAI:")
         print(raw)
 
@@ -965,8 +949,8 @@ Tu tarea:
   - ser autosuficiente pero encajar como parte de una pequeña historia enlazada.
 
 FORMATO DE RESPUESTA:
-- Devuélveme EXCLUSIVAMENTE un JSON con una lista de strings, por ejemplo:
-  ["texto del tuit 2", "texto del tuit 3", "..."]
+- Devuélveme EXCLUSIVAMENTE un JSON con esta forma:
+  {"tweets": ["texto del tuit 2", "texto del tuit 3", "..."]}
 - No añadas nada fuera del JSON.
 """
 
@@ -984,13 +968,14 @@ FORMATO DE RESPUESTA:
         ],
         temperature=0.6,
         max_tokens=400,
+        response_format={"type": "json_object"},
     )
 
     raw = completion.choices[0].message.content.strip()
-    raw_clean = clean_json_from_markdown(raw)
 
     tweets = []
     try:
+        raw_clean = clean_json_from_markdown(raw)
         data = json.loads(raw_clean)
 
         # Puede venir como lista directa ["...", "..."]
@@ -1031,7 +1016,7 @@ FORMATO DE RESPUESTA:
                     text = text[:272].rstrip() + "..."
                 tweets.append(text)
     except Exception as e:
-        print("⚠️ No se ha podido parsear el JSON de followups:", e)
+        print(f"⚠️ No se ha podido parsear el JSON de followups: {e}")
         print("Contenido bruto devuelto por OpenAI:")
         print(raw)
         tweets = []
